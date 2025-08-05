@@ -136,6 +136,67 @@ class TaskCompletionChecker(BaseAgent):
             yield Event(author=self.name)
 
 
+class EnhancedStatusReporter(BaseAgent):
+    """Repórter de status com estimativas de tempo e progresso visual."""
+
+    def __init__(self, name: str):
+        super().__init__(name=name)
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        state = ctx.session.state
+
+        # Status detalhado com progresso visual
+        status = self._generate_detailed_status(state)
+        yield Event(author=self.name, content=status)
+
+    def _generate_detailed_status(self, state: dict) -> str:
+        tasks = state.get("implementation_tasks", [])
+        task_index = state.get("current_task_index", 0)
+
+        # Ainda na fase de planejamento
+        if not tasks:
+            return "🔄 **FASE: PLANEJAMENTO**\nAnalisando documentos e criando plano de implementação..."
+
+        # Processo concluído
+        if "final_code_delivery" in state:
+            return "✅ **CONCLUÍDO**\nCódigo gerado e documentação pronta!"
+
+        # Processo em andamento
+        if task_index < len(tasks):
+            # Progresso visual
+            progress = task_index / len(tasks) if len(tasks) > 0 else 0
+            progress_bar = "█" * int(progress * 10) + "░" * (10 - int(progress * 10))
+
+            current_task = tasks[task_index]
+
+            # Estimativa de tempo
+            remaining_tasks = max(0, len(tasks) - task_index)
+            estimated_minutes = remaining_tasks * 3  # ~3min por tarefa
+
+            # Status da última revisão
+            review_status = "Pendente"
+            if "code_review_result" in state:
+                review_result = state["code_review_result"]
+                if isinstance(review_result, dict):
+                    review_status = review_result.get("grade", "Pendente").upper()
+
+            return f\"\"\"🔄 **EXECUTANDO: {task_index + 1}/{len(tasks)} tarefas**
+
+**Progresso:** [{progress_bar}] {progress:.1%}
+
+**Tarefa Atual:** {current_task.get('title', 'Processando...')}
+📁 `{current_task.get('file_path', 'N/A')}`
+
+**Tempo Estimado:** ~{estimated_minutes} minutos restantes
+
+**Última Revisão:** {review_status}\"\"\"
+
+        # Montando resultado final
+        return "🔄 **FINALIZANDO**\nMontando documentação e código final..."
+
+
 # --- PLANNING PIPELINE AGENTS ---
 
 context_synthesizer = LlmAgent(
@@ -746,8 +807,11 @@ execution_pipeline = SequentialAgent(
     name="execution_pipeline",
     description="Executes approved implementation plan, generating code for each task.",
     sub_agents=[
+        EnhancedStatusReporter(name="status_reporter_start"),     # Status inicial
         task_execution_loop,
+        EnhancedStatusReporter(name="status_reporter_assembly"),  # Status pré-assembly
         final_assembler,
+        EnhancedStatusReporter(name="status_reporter_final"),     # Status final
     ],
 )
 
