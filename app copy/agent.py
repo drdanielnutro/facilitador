@@ -62,8 +62,8 @@ def collect_code_snippets_callback(callback_context: CallbackContext) -> None:
     code_snippets = callback_context.state.get("approved_code_snippets", [])
     
     # Collect any newly approved code snippet
-    if "current_task_code" in callback_context.state:
-        code_snippet = callback_context.state["current_task_code"]
+    if "generated_code" in callback_context.state:
+        code_snippet = callback_context.state["generated_code"]
         task_info = callback_context.state.get("current_task_info", {})
         
         code_snippets.append({
@@ -149,13 +149,18 @@ context_synthesizer = LlmAgent(
 
     ## ENTRADA
     **Feature a Implementar:**
-    {feature_snippet}
+    {{ feature_snippet? }}
 
     ## DOCUMENTOS DE REFERÊNCIA
-    Você tem acesso aos seguintes documentos no histórico da conversa:
+    {{ if especificacao_tecnica_da_ui }}
     - `especificacao_tecnica_da_ui`: Arquitetura técnica do app Flutter
+    {{ endif }}
+    {{ if contexto_api }}
     - `contexto_api`: Documentação da API backend
+    {{ endif }}
+    {{ if fonte_da_verdade_ux }}
     - `fonte_da_verdade_ux`: Especificação de UX/Design
+    {{ endif }}
 
     ## SUA TAREFA
     Criar um "Feature Briefing" conciso e focado, extraindo:
@@ -316,7 +321,7 @@ task_manager = LlmAgent(
 
     ## ESTADO ATUAL
     **Task Index**: {current_task_index}
-    **Total Tasks**: {total_tasks}
+    **Total Tasks**: {{ len(implementation_tasks) }}
     **Current Task**: {current_task_info}
 
     ## SUA TAREFA
@@ -541,7 +546,7 @@ final_assembler = LlmAgent(
     Você é responsável por criar uma entrega profissional completa, incluindo todo o código implementado E documentação contextual que agrega valor ao desenvolvedor.
 
     ## DADOS DISPONÍVEIS
-    **Feature Name:** {feature_name}
+    **Feature Name:** {{ implementation_plan.feature_name or "Unknown Feature" }}
     **Feature Briefing:** {feature_briefing}
     **Implementation Plan:** {implementation_plan}
     **Approved Code Snippets:** {approved_code_snippets}
@@ -748,92 +753,54 @@ execution_pipeline = SequentialAgent(
 
 # --- MAIN ORCHESTRATOR ---
 
-interactive_planner_agent = LlmAgent(
-    name="interactive_planner_agent",
-    model=config.worker_model,
-    description="The primary feature implementation orchestrator managing the complete development cycle.",
-    instruction=f"""
-    ## IDENTIDADE: Feature Implementation Orchestrator
-    
-    Você é o Orquestrador Principal do sistema de desenvolvimento Flutter. Gerencia o ciclo completo de implementação de features usando uma arquitetura de pipeline duplo.
+class FeatureOrchestrator(BaseAgent):
+    def __init__(self, planning_pipeline: BaseAgent, execution_pipeline: BaseAgent):
+        super().__init__(
+            name="FeatureOrchestrator",
+            description="Manages the full lifecycle of Flutter feature implementation."
+        )
+        # Injetar os pipelines como dependências
+        self._planning_pipeline = planning_pipeline
+        self._execution_pipeline = execution_pipeline
+        # O estado inicial é aguardar a descrição da feature
+        self._state = "waiting_for_feature"
 
-    ## FLUXO DE TRABALHO
+    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
+        # Este agente é um state machine simples.
+        # Ele não usa um LLM para decidir, ele usa código Python.
 
-    ### FASE 1: Recepção de Documentos
-    No início da conversa:
-    1. Aguarde os três documentos de referência:
-       - `<especificacao_tecnica_da_ui>`
-       - `<contexto_api>`
-       - `<fonte_da_verdade_ux>`
-    2. Confirme recebimento quando fornecidos
-    3. Indique que está pronto para receber features
+        if self._state == "waiting_for_feature":
+            if "feature_snippet" in ctx.session.state:
+                yield Event(author=self.name, content="Feature snippet recebido. Iniciando o planejamento...")
+                self._state = "planning"
+                # Transfere o controle para o pipeline de planejamento
+                async for event in self.run_child(self._planning_pipeline, ctx):
+                    yield event
+            else:
+                yield Event(author=self.name, content="Aguardando o snippet da feature a ser implementada.")
+                return # Para e espera por nova entrada
 
-    ### FASE 2: Ciclo de Implementação (por Feature)
-    Para cada `<feature_snippet>` recebido:
+        if self._state == "planning":
+            # O planning_pipeline é responsável por obter a aprovação.
+            # Assumimos que se ele terminou, o plano está em `implementation_plan` e foi aprovado.
+            if "implementation_plan" in ctx.session.state:
+                yield Event(author=self.name, content="Plano aprovado. Iniciando a execução...")
+                self._state = "executing"
+                # Transfere o controle para o pipeline de execução
+                async for event in self.run_child(self._execution_pipeline, ctx):
+                    yield event
+            else:
+                yield Event(author=self.name, content="Ocorreu um erro durante a fase de planejamento.")
+                self._state = "waiting_for_feature" # Reseta o estado
 
-    #### 2.1 - Planejamento
-    1. Extraia o conteúdo do feature_snippet
-    2. Armazene em `feature_snippet` no estado
-    3. Execute o `planning_pipeline`:
-       - Criará o feature_briefing
-       - Gerará o implementation_plan
-       - Revisará e aprovará internamente
-    4. Apresente o plano ao usuário:
-       ```
-       📋 Plano de Implementação Pronto!
-       
-       Feature: [nome]
-       Tarefas: [número]
-       Tempo estimado: [horas]
-       
-       [Lista resumida das tarefas]
-       
-       Aprovar este plano? (sim/não/ajustar)
-       ```
+        if self._state == "executing":
+            # Após a execução, o ciclo está completo.
+            yield Event(author=self.name, content="Execução concluída com sucesso!")
+            self._state = "waiting_for_feature" # Reseta para a próxima feature
 
-    #### 2.2 - Execução (após aprovação)
-    1. Armazene o plano aprovado no estado
-    2. Inicialize o contexto de execução:
-       - `current_task_index`: 0
-       - `approved_code_snippets`: []
-       - `implementation_tasks`: [lista do plano]
-    3. Execute o `execution_pipeline`:
-       - Processará cada tarefa sequencialmente
-       - Gerará e revisará código
-       - Acumulará snippets aprovados
-    4. Comunique progresso ao usuário:
-       - "🔄 Processando tarefa 1/N..."
-       - "✅ Tarefa X concluída"
 
-    #### 2.3 - Entrega
-    1. Apresente o código final montado
-    2. Indique conclusão:
-       ```
-       ✨ Feature Implementada com Sucesso!
-       
-       [Resumo do que foi criado]
-       
-       🎯 Pronto para próxima feature!
-       Envie outro <feature_snippet> quando desejar.
-       ```
-
-    ### REGRAS CRÍTICAS
-    1. **Sempre use planning_pipeline ANTES de execution_pipeline**
-    2. **Aguarde aprovação explícita do plano**
-    3. **Mantenha o usuário informado do progresso**
-    4. **Preserve contexto entre features**
-    5. **Não execute tarefas - apenas delegue aos pipelines**
-
-    ### TRATAMENTO DE ERROS
-    - Se planning_pipeline falhar: Informe e peça clarificações
-    - Se execution_pipeline falhar: Mostre o erro e sugira correções
-    - Se documentos faltarem: Liste especificamente quais
-
-    Data atual: {datetime.datetime.now().strftime("%Y-%m-%d")}
-    """,
-    sub_agents=[planning_pipeline, execution_pipeline],
-    tools=[],
-    output_key="orchestration_result",
+# A nova raiz do agente
+root_agent = FeatureOrchestrator(
+    planning_pipeline=planning_pipeline,
+    execution_pipeline=execution_pipeline
 )
-
-root_agent = interactive_planner_agent
