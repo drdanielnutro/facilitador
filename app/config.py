@@ -41,18 +41,62 @@ else:
 
 
 @dataclass
-class ResearchConfiguration:
-    """Configuration for research-related models and parameters.
+class DevelopmentConfiguration:
+    """Configuration for Flutter development agent models and parameters.
+
+    This configuration controls the behavior of the multi-agent system
+    for Flutter feature implementation.
 
     Attributes:
-        critic_model (str): Model for evaluation tasks.
-        worker_model (str): Model for working/generation tasks.
-        max_search_iterations (int): Maximum search iterations allowed.
+        critic_model (str): Model for evaluation tasks (code review, planning review).
+        worker_model (str): Model for generation tasks (code generation, planning).
+        max_search_iterations (int): Maximum iterations for web search refinement.
+        max_task_iterations (int): Maximum number of tasks per feature implementation.
+        max_code_review_iterations (int): Maximum review cycles per code task.
+        max_plan_review_iterations (int): Maximum review cycles for implementation plans.
+        enable_detailed_logging (bool): Enable verbose logging for debugging.
+        enable_readme_generation (bool): Generate README.md for each feature.
+        code_style (str): Code style preference ('standard', 'minimal', 'verbose').
     """
 
+    # Model configuration
     critic_model: str = "gemini-2.5-pro"
     worker_model: str = "gemini-2.5-flash"
-    max_search_iterations: int = 5
+    
+    # Iteration limits
+    max_search_iterations: int = 5  # For web search refinement
+    max_task_iterations: int = 20  # Maximum tasks per feature
+    max_code_review_iterations: int = 3  # Reviews per code task
+    max_plan_review_iterations: int = 3  # Reviews for implementation plan
+    
+    # Feature flags
+    enable_detailed_logging: bool = True
+    enable_readme_generation: bool = True  # Generate comprehensive documentation
+    
+    # Code generation preferences
+    code_style: str = "standard"  # Options: 'standard', 'minimal', 'verbose'
+    
+    # Performance tuning
+    parallel_task_execution: bool = False  # Future enhancement
+    cache_generated_code: bool = True  # Cache snippets for reuse
+    
+    # Quality thresholds
+    min_code_coverage: float = 0.8  # Minimum test coverage target
+    max_cyclomatic_complexity: int = 10  # Maximum complexity per method
 
 
-config = ResearchConfiguration()
+# Create default configuration instance
+config = DevelopmentConfiguration()
+
+# Allow environment variable overrides
+if os.getenv("FLUTTER_AGENT_CRITIC_MODEL"):
+    config.critic_model = os.getenv("FLUTTER_AGENT_CRITIC_MODEL")
+
+if os.getenv("FLUTTER_AGENT_WORKER_MODEL"):
+    config.worker_model = os.getenv("FLUTTER_AGENT_WORKER_MODEL")
+
+if os.getenv("FLUTTER_AGENT_MAX_TASKS"):
+    config.max_task_iterations = int(os.getenv("FLUTTER_AGENT_MAX_TASKS"))
+
+if os.getenv("FLUTTER_AGENT_ENABLE_README"):
+    config.enable_readme_generation = os.getenv("FLUTTER_AGENT_ENABLE_README").lower() == "true"
