@@ -769,14 +769,13 @@ planning_pipeline = SequentialAgent(
     description="Creates comprehensive implementation plan for a feature.",
     sub_agents=[
         context_synthesizer,
-        feature_planner,
         LoopAgent(
             name="plan_review_loop",
             max_iterations=3,
             sub_agents=[
-                plan_reviewer,
+                feature_planner,  # Cria ou refaz o plano
+                plan_reviewer,    # Revisa o plano
                 EscalationChecker(name="plan_escalation_checker"),
-                feature_planner,  # Refaz o plano se necessário
             ],
         ),
     ],
