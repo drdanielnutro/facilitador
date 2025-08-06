@@ -2,14 +2,34 @@ install:
 	@command -v uv >/dev/null 2>&1 || { echo "uv is not installed. Installing uv..."; curl -LsSf https://astral.sh/uv/0.6.12/install.sh | sh; source $HOME/.local/bin/env; }
 	uv sync && npm --prefix frontend install
 
-dev:
-	make dev-backend & make dev-frontend
+# Main development command: runs all agents and the frontend
+dev: dev-all
 
-dev-backend:
-	uv run adk api_server app --allow_origins="*"
+# --- Development workflows ---
+dev-all:
+	@echo "Starting backend with ALL agents and frontend..."
+	make dev-backend-all & make dev-frontend
+
+dev-original:
+	@echo "Starting backend with ORIGINAL agent (app) and frontend..."
+	make dev-backend-original & make dev-frontend
+
+dev-coder:
+	@echo "Starting backend with CODER agent (app_coder) and frontend..."
+	make dev-backend-coder & make dev-frontend
+
+# --- Helper targets for backends ---
+dev-backend-all:
+	@uv run adk api_server --allow_origins="*"
+
+dev-backend-original:
+	@uv run adk api_server app --allow_origins="*"
+
+dev-backend-coder:
+	@uv run adk api_server app_coder --allow_origins="*"
 
 dev-frontend:
-	npm --prefix frontend run dev
+	@npm --prefix frontend run dev
 
 playground:
 	uv run adk web --port 8501
