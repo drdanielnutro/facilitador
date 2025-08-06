@@ -23,10 +23,8 @@ from google.adk.agents import BaseAgent, LlmAgent, LoopAgent, SequentialAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
-from google.adk.planners import BuiltInPlanner
 from google.adk.tools import google_search
 from google.adk.tools.agent_tool import AgentTool
-from google.genai import types as genai_types
 from google.genai.types import Content, Part
 from pydantic import BaseModel, Field
 
@@ -55,6 +53,26 @@ class Feedback(BaseModel):
         default=None,
         description="A list of specific, targeted follow-up search queries needed to fix research gaps. This should be null or empty if the grade is 'pass'.",
     )
+
+
+class ImplementationTask(BaseModel):
+    """Task within an implementation plan."""
+
+    id: str = Field(description="Unique identifier for the task, e.g., 'TASK-001'.")
+    category: Literal["MODEL", "PROVIDER", "WIDGET", "SERVICE", "UTIL"]
+    title: str = Field(description="A short, descriptive title for the task.")
+    description: str = Field(description="Detailed description of what to implement.")
+    file_path: str = Field(description="The full path where the file should be created or modified.")
+    action: Literal["CREATE", "MODIFY", "EXTEND"]
+    dependencies: list[str] = Field(description="A list of task IDs that must be completed before this one.")
+
+
+class ImplementationPlan(BaseModel):
+    """Structured plan produced by the planner agent."""
+
+    feature_name: str = Field(description="A descriptive name for the entire feature.")
+    estimated_time: str = Field(description="A high-level time estimate, e.g., '2-3 hours'.")
+    implementation_tasks: list[ImplementationTask]
 
 
 # --- Callbacks ---
@@ -103,6 +121,33 @@ def unpack_extracted_input_callback(callback_context: CallbackContext) -> None:
                     callback_context.state[key] = value
         except (json.JSONDecodeError, IndexError):
             pass
+
+
+def make_failure_handler(state_key: str, reason: str):
+    """Creates a callback that marks a failure if the review result isn't pass."""
+
+    def _callback(callback_context: CallbackContext) -> None:
+        result = callback_context.state.get(state_key)
+        if isinstance(result, dict):
+            grade = result.get("grade")
+        else:
+            grade = result
+        if grade != "pass":
+            callback_context.state[f"{state_key}_failed"] = True
+            callback_context.state[f"{state_key}_failure_reason"] = reason
+
+    return _callback
+
+
+def task_execution_failure_handler(callback_context: CallbackContext) -> None:
+    """Marks failure if task loop ends before completing all tasks."""
+    tasks = callback_context.state.get("implementation_tasks", [])
+    index = callback_context.state.get("current_task_index", 0)
+    if index < len(tasks):
+        callback_context.state["task_execution_failed"] = True
+        callback_context.state[
+            "task_execution_failure_reason"
+        ] = "Limite de tentativas atingido antes de completar todas as tarefas."
 
 
 # --- Custom Agent for Loop Control ---
@@ -403,6 +448,7 @@ feature_planner = LlmAgent(
     **CATEGORIAS VÁLIDAS**: MODEL, PROVIDER, WIDGET, SERVICE, UTIL
     **AÇÕES VÁLIDAS**: CREATE, MODIFY, EXTEND
     """,
+    output_schema=ImplementationPlan,
     output_key="implementation_plan",
 )
 
@@ -461,9 +507,6 @@ code_generator = LlmAgent(
     model=config.worker_model,
     name="code_generator",
     description="Generates production-ready Flutter/Dart code for a single task.",
-    planner=BuiltInPlanner(
-        thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
-    ),
     instruction="""
     ## IDENTIDADE: Senior Flutter Developer
     
@@ -595,9 +638,6 @@ code_refiner = LlmAgent(
     model=config.worker_model,
     name="code_refiner",
     description="Refines code based on review feedback.",
-    planner=BuiltInPlanner(
-        thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
-    ),
     instruction="""
     ## IDENTIDADE: Code Refinement Specialist
     
@@ -896,6 +936,10 @@ planning_pipeline = SequentialAgent(
                     review_key="plan_review_result",
                 ),
             ],
+            after_agent_callback=make_failure_handler(
+                "plan_review_result",
+                "Não foi possível atender aos critérios de revisão após 3 tentativas.",
+            ),
         ),
     ],
 )
@@ -918,6 +962,10 @@ task_execution_loop = LoopAgent(
                 ),
                 code_refiner,
             ],
+            after_agent_callback=make_failure_handler(
+                "code_review_result",
+                "Não foi possível atender aos critérios de revisão de código após 3 tentativas.",
+            ),
         ),
         code_approver,  # Salva código aprovado
         TaskIncrementer(name="task_incrementer"),
@@ -925,6 +973,7 @@ task_execution_loop = LoopAgent(
             name="task_completion_checker"
         ),  # Verifica se há mais tarefas
     ],
+    after_agent_callback=task_execution_failure_handler,
 )
 
 execution_pipeline = SequentialAgent(
@@ -960,48 +1009,57 @@ class FeatureOrchestrator(BaseAgent):
     def __init__(self, complete_pipeline: BaseAgent):
         super().__init__(
             name="FeatureOrchestrator",
-            description="Orchestrates the complete Flutter feature implementation flow."
+            description="Orchestrates the complete Flutter feature implementation flow.",
         )
         self._complete_pipeline = complete_pipeline
-        self._has_processed = False
-    
+
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        # Verifica se já processou para evitar loops
-        if self._has_processed:
+        state = ctx.session.state
+
+        if state.get("orchestrator_has_run"):
             yield Event(
                 author=self.name,
                 content=Content(parts=[Part(text="Processamento concluído.")])
             )
             return
-        
-        # Marca como processado
-        self._has_processed = True
-        
-        # Inicia o processamento
+
+        state["orchestrator_has_run"] = True
+
         yield Event(
             author=self.name,
             content=Content(parts=[Part(text="Iniciando processamento da solicitação...")])
         )
-        
-        # Executa o pipeline completo
+
         async for event in self._complete_pipeline.run_async(ctx):
             yield event
-        
-        # Verifica o resultado final
-        if "final_code_delivery" in ctx.session.state:
+
+        if state.get("plan_review_result_failed"):
+            yield Event(
+                author=self.name,
+                content=Content(parts=[Part(text=state.get("plan_review_result_failure_reason", "Falha no plano."))])
+            )
+        elif state.get("code_review_result_failed"):
+            yield Event(
+                author=self.name,
+                content=Content(parts=[Part(text=state.get("code_review_result_failure_reason", "Falha na revisão de código."))])
+            )
+        elif state.get("task_execution_failed"):
+            yield Event(
+                author=self.name,
+                content=Content(parts=[Part(text=state.get("task_execution_failure_reason", "Falha na execução das tarefas."))])
+            )
+        elif "final_code_delivery" in state:
             yield Event(
                 author=self.name,
                 content=Content(parts=[Part(text="✅ Feature implementada com sucesso!")])
             )
-        elif "feature_snippet" not in ctx.session.state:
+        elif "feature_snippet" not in state:
             yield Event(
                 author=self.name,
                 content=Content(parts=[Part(text="Por favor, forneça uma descrição clara da feature a ser implementada.")])
             )
-        
-        # Reset para próxima execução
-        self._has_processed = False
 
+        state["orchestrator_has_run"] = False
 
 # A nova raiz do agente
 root_agent = FeatureOrchestrator(
