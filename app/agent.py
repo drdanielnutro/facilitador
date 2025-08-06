@@ -26,6 +26,7 @@ from google.adk.planners import BuiltInPlanner
 from google.adk.tools import google_search
 from google.adk.tools.agent_tool import AgentTool
 from google.genai import types as genai_types
+from google.genai.types import Content, Part
 from pydantic import BaseModel, Field
 
 from .config import config
@@ -56,102 +57,41 @@ class Feedback(BaseModel):
 
 
 # --- Callbacks ---
-def collect_research_sources_callback(callback_context: CallbackContext) -> None:
-    """Collects and organizes web-based research sources and their supported claims from agent events.
-
-    This function processes the agent's `session.events` to extract web source details (URLs,
-    titles, domains from `grounding_chunks`) and associated text segments with confidence scores
-    (from `grounding_supports`). The aggregated source information and a mapping of URLs to short
-    IDs are cumulatively stored in `callback_context.state`.
-
-    Args:
-        callback_context (CallbackContext): The context object providing access to the agent's
-            session events and persistent state.
-    """
+def collect_code_snippets_callback(callback_context: CallbackContext) -> None:
+    """Collects approved code snippets throughout the execution pipeline."""
     session = callback_context._invocation_context.session
-    url_to_short_id = callback_context.state.get("url_to_short_id", {})
-    sources = callback_context.state.get("sources", {})
-    id_counter = len(url_to_short_id) + 1
-    for event in session.events:
-        if not (event.grounding_metadata and event.grounding_metadata.grounding_chunks):
-            continue
-        chunks_info = {}
-        for idx, chunk in enumerate(event.grounding_metadata.grounding_chunks):
-            if not chunk.web:
-                continue
-            url = chunk.web.uri
-            title = (
-                chunk.web.title
-                if chunk.web.title != chunk.web.domain
-                else chunk.web.domain
-            )
-            if url not in url_to_short_id:
-                short_id = f"src-{id_counter}"
-                url_to_short_id[url] = short_id
-                sources[short_id] = {
-                    "short_id": short_id,
-                    "title": title,
-                    "url": url,
-                    "domain": chunk.web.domain,
-                    "supported_claims": [],
-                }
-                id_counter += 1
-            chunks_info[idx] = url_to_short_id[url]
-        if event.grounding_metadata.grounding_supports:
-            for support in event.grounding_metadata.grounding_supports:
-                confidence_scores = support.confidence_scores or []
-                chunk_indices = support.grounding_chunk_indices or []
-                for i, chunk_idx in enumerate(chunk_indices):
-                    if chunk_idx in chunks_info:
-                        short_id = chunks_info[chunk_idx]
-                        confidence = (
-                            confidence_scores[i] if i < len(confidence_scores) else 0.5
-                        )
-                        text_segment = support.segment.text if support.segment else ""
-                        sources[short_id]["supported_claims"].append(
-                            {
-                                "text_segment": text_segment,
-                                "confidence": confidence,
-                            }
-                        )
-    callback_context.state["url_to_short_id"] = url_to_short_id
-    callback_context.state["sources"] = sources
+    code_snippets = callback_context.state.get("approved_code_snippets", [])
+    
+    # Collect any newly approved code snippet
+    if "generated_code" in callback_context.state:
+        code_snippet = callback_context.state["generated_code"]
+        task_info = callback_context.state.get("current_task_info", {})
+        
+        code_snippets.append({
+            "task_id": task_info.get("id", "unknown"),
+            "task_description": task_info.get("description", ""),
+            "file_path": task_info.get("file_path", ""),
+            "code": code_snippet
+        })
+    
+    callback_context.state["approved_code_snippets"] = code_snippets
 
 
-def citation_replacement_callback(
-    callback_context: CallbackContext,
-) -> genai_types.Content:
-    """Replaces citation tags in a report with Markdown-formatted links.
-
-    Processes 'final_cited_report' from context state, converting tags like
-    `<cite source="src-N"/>` into hyperlinks using source information from
-    `callback_context.state["sources"]`. Also fixes spacing around punctuation.
-
-    Args:
-        callback_context (CallbackContext): Contains the report and source information.
-
-    Returns:
-        genai_types.Content: The processed report with Markdown citation links.
-    """
-    final_report = callback_context.state.get("final_cited_report", "")
-    sources = callback_context.state.get("sources", {})
-
-    def tag_replacer(match: re.Match) -> str:
-        short_id = match.group(1)
-        if not (source_info := sources.get(short_id)):
-            logging.warning(f"Invalid citation tag found and removed: {match.group(0)}")
-            return ""
-        display_text = source_info.get("title", source_info.get("domain", short_id))
-        return f" [{display_text}]({source_info['url']})"
-
-    processed_report = re.sub(
-        r'<cite\s+source\s*=\s*["\']?\s*(src-\d+)\s*["\']?\s*/>',
-        tag_replacer,
-        final_report,
-    )
-    processed_report = re.sub(r"\s+([.,;:])", r"\1", processed_report)
-    callback_context.state["final_report_with_citations"] = processed_report
-    return genai_types.Content(parts=[genai_types.Part(text=processed_report)])
+def task_iteration_callback(callback_context: CallbackContext) -> None:
+    """Manages iteration through tasks in the implementation plan."""
+    # Get current task index
+    task_index = callback_context.state.get("current_task_index", 0)
+    tasks = callback_context.state.get("implementation_tasks", [])
+    
+    if task_index < len(tasks):
+        # Set up current task for processing
+        current_task = tasks[task_index]
+        callback_context.state["current_task_info"] = current_task
+        callback_context.state["current_task_description"] = current_task["description"]
+        logging.info(f"Processing task {task_index + 1}/{len(tasks)}: {current_task['description']}")
+    
+    # Increment for next iteration
+    callback_context.state["current_task_index"] = task_index + 1
 
 
 # --- Custom Agent for Loop Control ---
@@ -164,249 +104,836 @@ class EscalationChecker(BaseAgent):
     async def _run_async_impl(
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
-        evaluation_result = ctx.session.state.get("research_evaluation")
+        evaluation_result = ctx.session.state.get("code_review_result")
         if evaluation_result and evaluation_result.get("grade") == "pass":
             logging.info(
-                f"[{self.name}] Research evaluation passed. Escalating to stop loop."
+                f"[{self.name}] Code review passed. Escalating to stop loop."
             )
             yield Event(author=self.name, actions=EventActions(escalate=True))
         else:
             logging.info(
-                f"[{self.name}] Research evaluation failed or not found. Loop will continue."
+                f"[{self.name}] Code review failed. Loop will continue."
             )
-            # Yielding an event without content or actions just lets the flow continue.
             yield Event(author=self.name)
 
 
-# --- AGENT DEFINITIONS ---
-plan_generator = LlmAgent(
+class TaskCompletionChecker(BaseAgent):
+    """Checks if all tasks have been completed and escalates if done."""
+    
+    def __init__(self, name: str):
+        super().__init__(name=name)
+    
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        task_index = ctx.session.state.get("current_task_index", 0)
+        tasks = ctx.session.state.get("implementation_tasks", [])
+        
+        if task_index >= len(tasks):
+            logging.info(f"[{self.name}] All tasks completed. Escalating to finish.")
+            yield Event(author=self.name, actions=EventActions(escalate=True))
+        else:
+            logging.info(f"[{self.name}] More tasks remaining. Continuing...")
+            yield Event(author=self.name)
+
+
+class EnhancedStatusReporter(BaseAgent):
+    """Repórter de status com estimativas de tempo e progresso visual."""
+
+    def __init__(self, name: str):
+        super().__init__(name=name)
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        state = ctx.session.state
+
+        # Status detalhado com progresso visual
+        status = self._generate_detailed_status(state)
+        yield Event(
+            author=self.name,
+            content=Content(parts=[Part(text=status)])
+        )
+
+    def _generate_detailed_status(self, state: dict) -> str:
+        tasks = state.get("implementation_tasks", [])
+        task_index = state.get("current_task_index", 0)
+
+        # Ainda na fase de planejamento
+        if not tasks:
+            return "🔄 **FASE: PLANEJAMENTO**\nAnalisando documentos e criando plano de implementação..."
+
+        # Processo concluído
+        if "final_code_delivery" in state:
+            return "✅ **CONCLUÍDO**\nCódigo gerado e documentação pronta!"
+
+        # Processo em andamento
+        if task_index < len(tasks):
+            # Progresso visual
+            progress = task_index / len(tasks) if len(tasks) > 0 else 0
+            progress_bar = "█" * int(progress * 10) + "░" * (10 - int(progress * 10))
+
+            current_task = tasks[task_index]
+
+            # Estimativa de tempo
+            remaining_tasks = max(0, len(tasks) - task_index)
+            estimated_minutes = remaining_tasks * 3  # ~3min por tarefa
+
+            # Status da última revisão
+            review_status = "Pendente"
+            if "code_review_result" in state:
+                review_result = state["code_review_result"]
+                if isinstance(review_result, dict):
+                    review_status = review_result.get("grade", "Pendente").upper()
+
+            return f"""🔄 **EXECUTANDO: {task_index + 1}/{len(tasks)} tarefas**
+
+**Progresso:** [{progress_bar}] {progress:.1%}
+
+**Tarefa Atual:** {current_task.get('title', 'Processando...')}
+📁 `{current_task.get('file_path', 'N/A')}`
+
+**Tempo Estimado:** ~{estimated_minutes} minutos restantes
+
+**Última Revisão:** {review_status}"""
+
+        # Montando resultado final
+        return "🔄 **FINALIZANDO**\nMontando documentação e código final..."
+
+
+# --- PLANNING PIPELINE AGENTS ---
+
+context_synthesizer = LlmAgent(
     model=config.worker_model,
-    name="plan_generator",
-    description="Generates or refine the existing 5 line action-oriented research plan, using minimal search only for topic clarification.",
-    instruction=f"""
-    You are a research strategist. Your job is to create a high-level RESEARCH PLAN, not a summary. If there is already a RESEARCH PLAN in the session state,
-    improve upon it based on the user feedback.
-
-    RESEARCH PLAN(SO FAR):
-    {{ research_plan? }}
-
-    **GENERAL INSTRUCTION: CLASSIFY TASK TYPES**
-    Your plan must clearly classify each goal for downstream execution. Each bullet point should start with a task type prefix:
-    - **`[RESEARCH]`**: For goals that primarily involve information gathering, investigation, analysis, or data collection (these require search tool usage by a researcher).
-    - **`[DELIVERABLE]`**: For goals that involve synthesizing collected information, creating structured outputs (e.g., tables, charts, summaries, reports), or compiling final output artifacts (these are executed AFTER research tasks, often without further search).
-
-    **INITIAL RULE: Your initial output MUST start with a bulleted list of 5 action-oriented research goals or key questions, followed by any *inherently implied* deliverables.**
-    - All initial 5 goals will be classified as `[RESEARCH]` tasks.
-    - A good goal for `[RESEARCH]` starts with a verb like "Analyze," "Identify," "Investigate."
-    - A bad output is a statement of fact like "The event was in April 2024."
-    - **Proactive Implied Deliverables (Initial):** If any of your initial 5 `[RESEARCH]` goals inherently imply a standard output or deliverable (e.g., a comparative analysis suggesting a comparison table, or a comprehensive review suggesting a summary document), you MUST add these as additional, distinct goals immediately after the initial 5. Phrase these as *synthesis or output creation actions* (e.g., "Create a summary," "Develop a comparison," "Compile a report") and prefix them with `[DELIVERABLE][IMPLIED]`.
-
-    **REFINEMENT RULE**:
-    - **Integrate Feedback & Mark Changes:** When incorporating user feedback, make targeted modifications to existing bullet points. Add `[MODIFIED]` to the existing task type and status prefix (e.g., `[RESEARCH][MODIFIED]`). If the feedback introduces new goals:
-        - If it's an information gathering task, prefix it with `[RESEARCH][NEW]`.
-        - If it's a synthesis or output creation task, prefix it with `[DELIVERABLE][NEW]`.
-    - **Proactive Implied Deliverables (Refinement):** Beyond explicit user feedback, if the nature of an existing `[RESEARCH]` goal (e.g., requiring a structured comparison, deep dive analysis, or broad synthesis) or a `[DELIVERABLE]` goal inherently implies an additional, standard output or synthesis step (e.g., a detailed report following a summary, or a visual representation of complex data), proactively add this as a new goal. Phrase these as *synthesis or output creation actions* and prefix them with `[DELIVERABLE][IMPLIED]`.
-    - **Maintain Order:** Strictly maintain the original sequential order of existing bullet points. New bullets, whether `[NEW]` or `[IMPLIED]`, should generally be appended to the list, unless the user explicitly instructs a specific insertion point.
-    - **Flexible Length:** The refined plan is no longer constrained by the initial 5-bullet limit and may comprise more goals as needed to fully address the feedback and implied deliverables.
-
-    **TOOL USE IS STRICTLY LIMITED:**
-    Your goal is to create a generic, high-quality plan *without searching*.
-    Only use `google_search` if a topic is ambiguous or time-sensitive and you absolutely cannot create a plan without a key piece of identifying information.
-    You are explicitly forbidden from researching the *content* or *themes* of the topic. That is the next agent's job. Your search is only to identify the subject, not to investigate it.
-    Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
-    """,
-    tools=[google_search],
-)
-
-
-section_planner = LlmAgent(
-    model=config.worker_model,
-    name="section_planner",
-    description="Breaks down the research plan into a structured markdown outline of report sections.",
+    name="context_synthesizer",
+    description="Synthesizes the 3 source documents into a focused briefing for the current feature.",
     instruction="""
-    You are an expert report architect. Using the research topic and the plan from the 'research_plan' state key, design a logical structure for the final report.
-    Note: Ignore all the tag nanes ([MODIFIED], [NEW], [RESEARCH], [DELIVERABLE]) in the research plan.
-    Your task is to create a markdown outline with 4-6 distinct sections that cover the topic comprehensively without overlap.
-    You can use any markdown format you prefer, but here's a suggested structure:
-    # Section Name
-    A brief overview of what this section covers
-    Feel free to add subsections or bullet points if needed to better organize the content.
-    Make sure your outline is clear and easy to follow.
-    Do not include a "References" or "Sources" section in your outline. Citations will be handled in-line.
+    ## IDENTIDADE: Context Synthesizer
+    
+    Você é um especialista em análise de documentação técnica. Sua função é extrair e sintetizar APENAS as informações relevantes dos três documentos de referência para a feature específica sendo implementada.
+
+    ## ENTRADA
+    **Feature a Implementar:**
+    {{ feature_snippet? }}
+
+    ## DOCUMENTOS DE REFERÊNCIA
+    {{ if especificacao_tecnica_da_ui }}
+    - `especificacao_tecnica_da_ui`: Arquitetura técnica do app Flutter
+    {{ endif }}
+    {{ if contexto_api }}
+    - `contexto_api`: Documentação da API backend
+    {{ endif }}
+    {{ if fonte_da_verdade_ux }}
+    - `fonte_da_verdade_ux`: Especificação de UX/Design
+    {{ endif }}
+
+    ## SUA TAREFA
+    Criar um "Feature Briefing" conciso e focado, extraindo:
+
+    ### 1. Da Especificação Técnica:
+    - Padrões arquiteturais aplicáveis (Riverpod, json_dynamic_widget, etc.)
+    - Estrutura de pastas e convenções
+    - Dependências e bibliotecas relevantes
+
+    ### 2. Do Contexto da API:
+    - Endpoints específicos necessários
+    - Estruturas de request/response
+    - Fluxo de autenticação se aplicável
+
+    ### 3. Da Fonte da Verdade UX:
+    - Fluxo exato de interação do usuário
+    - Elementos visuais necessários
+    - Estados e transições
+
+    ## FORMATO DE SAÍDA
+    ```
+    FEATURE BRIEFING: [Nome da Feature]
+    
+    ## Requisitos de UX
+    - [Descrição do comportamento esperado]
+    - [Interações do usuário]
+    
+    ## Arquitetura Técnica
+    - Padrão: [Riverpod/MVVM/etc]
+    - Widgets necessários: [lista]
+    
+    ## Integração com API
+    - Endpoint: [método e path]
+    - Request: [estrutura]
+    - Response: [estrutura]
+    
+    ## Considerações Especiais
+    - [Qualquer detalhe importante]
+    ```
     """,
-    output_key="report_sections",
+    output_key="feature_briefing",
 )
 
-
-section_researcher = LlmAgent(
+feature_planner = LlmAgent(
     model=config.worker_model,
-    name="section_researcher",
-    description="Performs the crucial first pass of web research.",
-    planner=BuiltInPlanner(
-        thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
-    ),
+    name="feature_planner",
+    description="Creates a detailed, actionable implementation plan with concrete coding tasks.",
     instruction="""
-    You are a highly capable and diligent research and synthesis agent. Your comprehensive task is to execute a provided research plan with **absolute fidelity**, first by gathering necessary information, and then by synthesizing that information into specified outputs.
+    ## IDENTIDADE: Flutter Tech Lead
+    
+    Você é um Tech Lead experiente em Flutter. Baseando-se no Feature Briefing fornecido, crie um plano de implementação detalhado e sequencial.
 
-    You will be provided with a sequential list of research plan goals, stored in the `research_plan` state key. Each goal will be clearly prefixed with its primary task type: `[RESEARCH]` or `[DELIVERABLE]`.
+    ## ENTRADA
+    **Feature Briefing:**
+    {feature_briefing}
 
-    Your execution process must strictly adhere to these two distinct and sequential phases:
+    ## SUA TAREFA
+    Criar uma lista estruturada de TODAS as tarefas de código necessárias para implementar esta feature. 
+    
+    ## REGRAS PARA O PLANO
+    1. Ordene as tarefas por dependência (models → providers → widgets → integration)
+    2. Cada tarefa deve ser atômica e implementável em 15-30 minutos
+    3. Especifique exatamente qual arquivo criar ou modificar
+    4. Inclua descrição clara do que implementar
 
-    ---
+    ## FORMATO DE SAÍDA (JSON)
+    ```json
+    {
+      "feature_name": "Nome descritivo da feature",
+      "estimated_time": "2-3 horas",
+      "implementation_tasks": [
+        {
+          "id": "TASK-001",
+          "category": "MODEL",
+          "title": "Criar modelo de estado",
+          "description": "Implementar FeatureState com Freezed incluindo campos: isLoading, errorMessage, data",
+          "file_path": "lib/features/feature_name/models/feature_state.dart",
+          "action": "CREATE",
+          "dependencies": []
+        },
+        {
+          "id": "TASK-002",
+          "category": "PROVIDER",
+          "title": "Implementar StateNotifier",
+          "description": "Criar FeatureNotifier extending StateNotifier<FeatureState> com métodos para gerenciar estado",
+          "file_path": "lib/features/feature_name/providers/feature_provider.dart",
+          "action": "CREATE",
+          "dependencies": ["TASK-001"]
+        }
+      ]
+    }
+    ```
 
-    **Phase 1: Information Gathering (`[RESEARCH]` Tasks)**
-
-    *   **Execution Directive:** You **MUST** systematically process every goal prefixed with `[RESEARCH]` before proceeding to Phase 2.
-    *   For each `[RESEARCH]` goal:
-        *   **Query Generation:** Formulate a comprehensive set of 4-5 targeted search queries. These queries must be expertly designed to broadly cover the specific intent of the `[RESEARCH]` goal from multiple angles.
-        *   **Execution:** Utilize the `google_search` tool to execute **all** generated queries for the current `[RESEARCH]` goal.
-        *   **Summarization:** Synthesize the search results into a detailed, coherent summary that directly addresses the objective of the `[RESEARCH]` goal.
-        *   **Internal Storage:** Store this summary, clearly tagged or indexed by its corresponding `[RESEARCH]` goal, for later and exclusive use in Phase 2. You **MUST NOT** lose or discard any generated summaries.
-
-    ---
-
-    **Phase 2: Synthesis and Output Creation (`[DELIVERABLE]` Tasks)**
-
-    *   **Execution Prerequisite:** This phase **MUST ONLY COMMENCE** once **ALL** `[RESEARCH]` goals from Phase 1 have been fully completed and their summaries are internally stored.
-    *   **Execution Directive:** You **MUST** systematically process **every** goal prefixed with `[DELIVERABLE]`. For each `[DELIVERABLE]` goal, your directive is to **PRODUCE** the artifact as explicitly described.
-    *   For each `[DELIVERABLE]` goal:
-        *   **Instruction Interpretation:** You will interpret the goal's text (following the `[DELIVERABLE]` tag) as a **direct and non-negotiable instruction** to generate a specific output artifact.
-            *   *If the instruction details a table (e.g., "Create a Detailed Comparison Table in Markdown format"), your output for this step **MUST** be a properly formatted Markdown table utilizing columns and rows as implied by the instruction and the prepared data.*
-            *   *If the instruction states to prepare a summary, report, or any other structured output, your output for this step **MUST** be that precise artifact.*
-        *   **Data Consolidation:** Access and utilize **ONLY** the summaries generated during Phase 1 (`[RESEARCH]` tasks`) to fulfill the requirements of the current `[DELIVERABLE]` goal. You **MUST NOT** perform new searches.
-        *   **Output Generation:** Based on the specific instruction of the `[DELIVERABLE]` goal:
-            *   Carefully extract, organize, and synthesize the relevant information from your previously gathered summaries.
-            *   Must always produce the specified output artifact (e.g., a concise summary, a structured comparison table, a comprehensive report, a visual representation, etc.) with accuracy and completeness.
-        *   **Output Accumulation:** Maintain and accumulate **all** the generated `[DELIVERABLE]` artifacts. These are your final outputs.
-
-    ---
-
-    **Final Output:** Your final output will comprise the complete set of processed summaries from `[RESEARCH]` tasks AND all the generated artifacts from `[DELIVERABLE]` tasks, presented clearly and distinctly.
+    **CATEGORIAS VÁLIDAS**: MODEL, PROVIDER, WIDGET, SERVICE, UTIL
+    **AÇÕES VÁLIDAS**: CREATE, MODIFY, EXTEND
     """,
-    tools=[google_search],
-    output_key="section_research_findings",
-    after_agent_callback=collect_research_sources_callback,
+    output_key="implementation_plan",
 )
 
-research_evaluator = LlmAgent(
+plan_reviewer = LlmAgent(
     model=config.critic_model,
-    name="research_evaluator",
-    description="Critically evaluates research and generates follow-up queries.",
-    instruction=f"""
-    You are a meticulous quality assurance analyst evaluating the research findings in 'section_research_findings'.
+    name="plan_reviewer",
+    description="Reviews the implementation plan for completeness and quality.",
+    instruction="""
+    ## IDENTIDADE: Principal Flutter Architect
+    
+    Você é um arquiteto principal revisando planos de implementação. Avalie o plano fornecido com rigor.
 
-    **CRITICAL RULES:**
-    1. Assume the given research topic is correct. Do not question or try to verify the subject itself.
-    2. Your ONLY job is to assess the quality, depth, and completeness of the research provided *for that topic*.
-    3. Focus on evaluating: Comprehensiveness of coverage, logical flow and organization, use of credible sources, depth of analysis, and clarity of explanations.
-    4. Do NOT fact-check or question the fundamental premise or timeline of the topic.
-    5. If suggesting follow-up queries, they should dive deeper into the existing topic, not question its validity.
+    ## ENTRADA
+    **Implementation Plan:**
+    {implementation_plan}
 
-    Be very critical about the QUALITY of research. If you find significant gaps in depth or coverage, assign a grade of "fail",
-    write a detailed comment about what's missing, and generate 5-7 specific follow-up queries to fill those gaps.
-    If the research thoroughly covers the topic, grade "pass".
+    **Feature Briefing:**
+    {feature_briefing}
 
-    Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
-    Your response must be a single, raw JSON object validating against the 'Feedback' schema.
+    ## CRITÉRIOS DE AVALIAÇÃO
+    1. **Completude**: O plano cobre todos os aspectos do briefing?
+    2. **Sequência Lógica**: As dependências estão corretas?
+    3. **Granularidade**: As tarefas são pequenas o suficiente?
+    4. **Clareza**: Cada tarefa está bem descrita?
+    5. **Arquitetura**: Segue os padrões estabelecidos?
+
+    ## REGRAS DE DECISÃO
+    - **PASS**: Se o plano está completo e bem estruturado
+    - **FAIL**: Se faltam tarefas essenciais ou há problemas de sequência
+
+    ## FORMATO DE RESPOSTA
+    Retorne um JSON no formato:
+    ```json
+    {
+      "grade": "pass",
+      "comment": "Plano completo e bem estruturado, cobrindo todos os aspectos da feature."
+    }
+    ```
+    
+    Ou se houver problemas:
+    ```json
+    {
+      "grade": "fail",
+      "comment": "Faltam tarefas para [aspecto específico]. Adicionar: [sugestões específicas]"
+    }
+    ```
     """,
     output_schema=Feedback,
-    disallow_transfer_to_parent=True,
-    disallow_transfer_to_peers=True,
-    output_key="research_evaluation",
+    output_key="plan_review_result",
 )
 
-enhanced_search_executor = LlmAgent(
+# --- EXECUTION PIPELINE AGENTS ---
+
+task_manager = LlmAgent(
     model=config.worker_model,
-    name="enhanced_search_executor",
-    description="Executes follow-up searches and integrates new findings.",
+    name="task_manager",
+    description="Manages the current task being processed in the execution pipeline.",
+    instruction="""
+    ## IDENTIDADE: Task Manager
+    
+    Você é responsável por preparar o contexto para a execução de uma tarefa específica.
+
+    ## ESTADO ATUAL
+    **Task Index**: {current_task_index}
+    **Total Tasks**: {{ len(implementation_tasks) }}
+    **Current Task**: {current_task_info}
+
+    ## SUA TAREFA
+    1. Extraia a tarefa atual do plano
+    2. Prepare o contexto necessário para o code_generator
+    3. Atualize o estado para a próxima iteração
+
+    ## SAÍDA
+    Confirme qual tarefa está sendo processada e seu contexto.
+    """,
+    output_key="task_context",
+)
+
+code_generator = LlmAgent(
+    model=config.worker_model,
+    name="code_generator",
+    description="Generates production-ready Flutter/Dart code for a single task.",
     planner=BuiltInPlanner(
         thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
     ),
     instruction="""
-    You are a specialist researcher executing a refinement pass.
-    You have been activated because the previous research was graded as 'fail'.
+    ## IDENTIDADE: Senior Flutter Developer
+    
+    Você é um desenvolvedor Flutter sênior gerando código production-ready para UMA tarefa específica.
 
-    1.  Review the 'research_evaluation' state key to understand the feedback and required fixes.
-    2.  Execute EVERY query listed in 'follow_up_queries' using the 'google_search' tool.
-    3.  Synthesize the new findings and COMBINE them with the existing information in 'section_research_findings'.
-    4.  Your output MUST be the new, complete, and improved set of research findings.
+    ## CONTEXTO
+    **Feature Briefing:**
+    {feature_briefing}
+
+    **Tarefa Atual:**
+    {current_task_info}
+
+    ## PADRÕES OBRIGATÓRIOS
+
+    ### Para Models (use Freezed):
+    ```dart
+    import 'package:freezed_annotation/freezed_annotation.dart';
+    
+    part 'model_name.freezed.dart';
+    part 'model_name.g.dart';
+    
+    @freezed
+    class ModelName with _$ModelName {
+      const factory ModelName({
+        required String field1,
+        @Default(false) bool field2,
+      }) = _ModelName;
+      
+      factory ModelName.fromJson(Map<String, dynamic> json) =>
+          _$ModelNameFromJson(json);
+    }
+    ```
+
+    ### Para Providers (Riverpod 2.0):
+    ```dart
+    import 'package:flutter_riverpod/flutter_riverpod.dart';
+    
+    final providerName = StateNotifierProvider<NotifierClass, StateClass>((ref) {
+      return NotifierClass(ref);
+    });
+    ```
+
+    ### Para Widgets:
+    - Use ConsumerWidget ou ConsumerStatefulWidget
+    - Implemente loading, error e success states
+    - Use const constructors sempre que possível
+
+    ## REGRAS
+    1. Gere APENAS o código para a tarefa especificada
+    2. Código deve estar completo e funcional
+    3. Inclua todos os imports necessários
+    4. Siga as convenções do projeto
+    5. Adicione comentários onde necessário
+
+    ## SAÍDA
+    Retorne APENAS o código Dart, pronto para ser salvo no arquivo especificado.
+    """,
+    output_key="generated_code",
+)
+
+code_reviewer = LlmAgent(
+    model=config.critic_model,
+    name="code_reviewer",
+    description="Reviews generated code for quality, correctness and adherence to requirements.",
+    instruction="""
+    ## IDENTIDADE: Principal Software Engineer
+    
+    Você é um engenheiro principal realizando code review rigoroso.
+
+    ## CONTEXTO
+    **Feature Briefing:**
+    {feature_briefing}
+
+    **Task Description:**
+    {current_task_info}
+
+    **Generated Code:**
+    {generated_code}
+
+    ## CRITÉRIOS DE REVISÃO
+
+    ### 1. Correção Funcional (40%)
+    - [ ] Implementa exatamente o que foi pedido?
+    - [ ] Lógica está correta?
+    - [ ] Tratamento de erros adequado?
+
+    ### 2. Qualidade do Código (30%)
+    - [ ] Segue convenções Dart/Flutter?
+    - [ ] Código limpo e legível?
+    - [ ] Sem duplicação?
+
+    ### 3. Arquitetura (20%)
+    - [ ] Respeita padrões do projeto?
+    - [ ] Usa Riverpod corretamente?
+    - [ ] Separação de responsabilidades?
+
+    ### 4. Performance (10%)
+    - [ ] Usa const onde possível?
+    - [ ] Evita rebuilds desnecessários?
+    - [ ] Gerencia recursos corretamente?
+
+    ## FORMATO DE RESPOSTA
+    
+    Para código APROVADO:
+    ```json
+    {
+      "grade": "pass",
+      "comment": "Código implementa corretamente [descrição]. Segue todos os padrões e está pronto para produção."
+    }
+    ```
+
+    Para código com PROBLEMAS:
+    ```json
+    {
+      "grade": "fail",
+      "comment": "Problemas identificados: [lista específica]. Correções necessárias: [lista de mudanças]",
+      "follow_up_queries": [
+        {"search_query": "Flutter [specific pattern] best practices"},
+        {"search_query": "Riverpod [specific issue] solution"}
+      ]
+    }
+    ```
+    """,
+    output_schema=Feedback,
+    output_key="code_review_result",
+)
+
+code_refiner = LlmAgent(
+    model=config.worker_model,
+    name="code_refiner",
+    description="Refines code based on review feedback.",
+    planner=BuiltInPlanner(
+        thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
+    ),
+    instruction="""
+    ## IDENTIDADE: Code Refinement Specialist
+    
+    Você é especialista em corrigir e melhorar código baseado em feedback de revisão.
+
+    ## CONTEXTO
+    **Review Feedback:**
+    {code_review_result}
+
+    **Original Code:**
+    {generated_code}
+
+    **Task Context:**
+    {current_task_info}
+
+    ## SUA TAREFA
+    1. Analise o feedback da revisão
+    2. Execute TODAS as queries de follow-up se houver
+    3. Implemente TODAS as correções solicitadas
+    4. Mantenha o que estava bom
+    5. Melhore o que foi criticado
+
+    ## PROCESSO
+    Se há queries de follow-up:
+    1. Execute cada uma com google_search
+    2. Incorpore as best practices encontradas
+    3. Aplique ao código
+
+    ## SAÍDA
+    Retorne o código CORRIGIDO e MELHORADO, pronto para nova revisão.
     """,
     tools=[google_search],
-    output_key="section_research_findings",
-    after_agent_callback=collect_research_sources_callback,
+    output_key="generated_code",
 )
 
-report_composer = LlmAgent(
-    model=config.critic_model,
-    name="report_composer_with_citations",
-    include_contents="none",
-    description="Transforms research data and a markdown outline into a final, cited report.",
+code_approver = LlmAgent(
+    model=config.worker_model,
+    name="code_approver",
+    description="Saves approved code to the state for final assembly.",
     instruction="""
-    Transform the provided data into a polished, professional, and meticulously cited research report.
+    ## IDENTIDADE: Code Approval Manager
+    
+    O código para a tarefa atual foi aprovado na revisão. 
 
-    ---
-    ### INPUT DATA
-    *   Research Plan: `{research_plan}`
-    *   Research Findings: `{section_research_findings}`
-    *   Citation Sources: `{sources}`
-    *   Report Structure: `{report_sections}`
+    ## SUA TAREFA
+    1. Registre o código aprovado no estado
+    2. Marque a tarefa como completa
+    3. Prepare para a próxima tarefa
 
-    ---
-    ### CRITICAL: Citation System
-    To cite a source, you MUST insert a special citation tag directly after the claim it supports.
+    ## DADOS
+    **Task Info:** {current_task_info}
+    **Approved Code:** {generated_code}
 
-    **The only correct format is:** `<cite source="src-ID_NUMBER" />`
-
-    ---
-    ### Final Instructions
-    Generate a comprehensive report using ONLY the `<cite source="src-ID_NUMBER" />` tag system for all citations.
-    The final report must strictly follow the structure provided in the **Report Structure** markdown outline.
-    Do not include a "References" or "Sources" section; all citations must be in-line.
+    ## SAÍDA
+    Confirme que o código foi registrado e a tarefa marcada como completa.
     """,
-    output_key="final_cited_report",
-    after_agent_callback=citation_replacement_callback,
+    output_key="approval_confirmation",
+    after_agent_callback=collect_code_snippets_callback,
 )
 
-research_pipeline = SequentialAgent(
-    name="research_pipeline",
-    description="Executes a pre-approved research plan. It performs iterative research, evaluation, and composes a final, cited report.",
+final_assembler = LlmAgent(
+    model=config.critic_model,
+    name="final_assembler",
+    description="Assembles all approved code snippets into the final deliverable with comprehensive documentation.",
+    instruction="""
+    ## IDENTIDADE: Final Code Assembler & Documentation Generator
+    
+    Você é responsável por criar uma entrega profissional completa, incluindo todo o código implementado E documentação contextual que agrega valor ao desenvolvedor.
+
+    ## DADOS DISPONÍVEIS
+    **Feature Name:** {{ implementation_plan.feature_name or "Unknown Feature" }}
+    **Feature Briefing:** {feature_briefing}
+    **Implementation Plan:** {implementation_plan}
+    **Approved Code Snippets:** {approved_code_snippets}
+
+    ## SUA MISSÃO
+    Criar uma entrega completa que inclua:
+    1. Todo o código implementado organizado por categoria
+    2. Um README.md específico da feature explicando arquitetura e integração
+    3. Instruções claras de como conectar a feature ao app principal
+
+    ## FORMATO DE SAÍDA OBRIGATÓRIO
+
+    Sua resposta DEVE conter DUAS seções principais:
+
+    ### SEÇÃO 1: README da Feature
+    ```markdown
+    <!-- README.md -->
+    # Feature: [Nome Descritivo]
+
+    ## 📋 Visão Geral
+    [Descrição concisa do que a feature faz e seu valor para o usuário]
+
+    ## 🏗️ Arquitetura
+    
+    ### Componentes Principais
+    - **Models**: [Descreva os modelos de dados e seu propósito]
+    - **Providers**: [Explique o gerenciamento de estado]
+    - **Widgets**: [Liste os widgets principais e suas responsabilidades]
+    - **Services**: [Descreva integrações com API]
+
+    ### Fluxo de Dados
+    ```
+    User Input → Widget → Provider → Service → API
+                   ↑          ↓
+                   └──────────┘
+    ```
+
+    ## 📁 Estrutura de Arquivos
+    ```
+    lib/features/[feature_name]/
+    ├── models/
+    │   └── feature_state.dart
+    ├── providers/
+    │   └── feature_provider.dart
+    ├── widgets/
+    │   └── feature_widget.dart
+    └── services/
+        └── feature_service.dart
+    ```
+
+    ## 🔧 Como Integrar
+
+    ### 1. Adicionar ao Roteamento
+    ```dart
+    // Em lib/router/app_router.dart
+    GoRoute(
+      path: '/feature-name',
+      builder: (context, state) => const FeatureWidget(),
+    ),
+    ```
+
+    ### 2. Registrar Providers (se necessário)
+    ```dart
+    // Em lib/main.dart ou provider_scope
+    ProviderScope(
+      overrides: [
+        // Adicione overrides se necessário
+      ],
+    )
+    ```
+
+    ### 3. Conectar à Navegação
+    ```dart
+    // Onde você quer acessar a feature
+    context.go('/feature-name');
+    ```
+
+    ## 🧪 Testando a Feature
+    
+    ### Testes Unitários Sugeridos
+    - [ ] Testar transformações do modelo
+    - [ ] Testar lógica do StateNotifier
+    - [ ] Testar chamadas de API mockadas
+
+    ### Testes de Widget Sugeridos
+    - [ ] Testar estados de loading
+    - [ ] Testar tratamento de erros
+    - [ ] Testar fluxo completo do usuário
+
+    ## 🚀 Checklist de Deploy
+    - [ ] Executar `flutter pub get`
+    - [ ] Executar `flutter pub run build_runner build --delete-conflicting-outputs`
+    - [ ] Verificar análise estática: `flutter analyze`
+    - [ ] Executar testes: `flutter test`
+    - [ ] Testar em dispositivo físico
+    - [ ] Verificar performance com Flutter DevTools
+
+    ## 📝 Notas Técnicas
+    [Qualquer consideração especial, limitação conhecida ou decisão arquitetural importante]
+    ```
+
+    ### SEÇÃO 2: Código Implementado
+    ```markdown
+    # 💻 Código Implementado
+
+    ## Resumo da Implementação
+    - **Total de arquivos**: [número]
+    - **Linhas de código**: ~[estimativa]
+    - **Tempo estimado**: [horas]
+    - **Complexidade**: [Baixa/Média/Alta]
+
+    ## Arquivos Criados
+
+    [Organize por categoria: Models → Providers → Widgets → Services]
+
+    ### 📦 Models
+
+    #### `lib/features/[feature]/models/[model].dart`
+    ```dart
+    [código completo]
+    ```
+
+    ### 🔄 Providers
+
+    #### `lib/features/[feature]/providers/[provider].dart`
+    ```dart
+    [código completo]
+    ```
+
+    ### 🎨 Widgets
+
+    #### `lib/features/[feature]/widgets/[widget].dart`
+    ```dart
+    [código completo]
+    ```
+
+    ### 🔌 Services
+
+    #### `lib/features/[feature]/services/[service].dart`
+    ```dart
+    [código completo]
+    ```
+    ```
+
+    ## REGRAS IMPORTANTES
+    1. O README deve ser específico e contextual para ESTA feature
+    2. Use diagramas simples em ASCII quando ajudar a explicar o fluxo
+    3. Exemplos de código no README devem ser reais, não genéricos
+    4. Mantenha um tom profissional mas acessível
+    5. Foque em agregar valor prático ao desenvolvedor que vai integrar
+    """,
+    output_key="final_code_delivery",
+)
+
+# --- INPUT PROCESSING AGENT ---
+
+input_processor = LlmAgent(
+    model=config.worker_model,
+    name="input_processor",
+    description="Processes and extracts feature requests and documentation from user input",
+    instruction="""
+    ## IDENTIDADE: Input Processor
+    
+    Você é responsável por processar a entrada do usuário e extrair informações estruturadas
+    para o sistema de geração de código Flutter.
+    
+    ## SUA TAREFA
+    
+    Analise a mensagem do usuário e extraia:
+    
+    1. **Feature Request** (OBRIGATÓRIO):
+       - Procure por conteúdo entre tags [feature_snippet]...[/feature_snippet]
+       - Se não houver tags, trate a mensagem inteira como feature request
+       - Armazene em: feature_snippet
+    
+    2. **Documentação de Referência** (OPCIONAL):
+       - [especificacao_tecnica_da_ui]...[/especificacao_tecnica_da_ui]: Especificações técnicas da UI
+       - [contexto_api]...[/contexto_api]: Documentação da API
+       - [fonte_da_verdade_ux]...[/fonte_da_verdade_ux]: Requisitos de UX
+    
+    ## REGRAS DE EXTRAÇÃO
+    
+    1. Se encontrar tags, extraia EXATAMENTE o conteúdo entre elas
+    2. Preserve formatação, quebras de linha e código
+    3. Se não encontrar [feature_snippet], mas encontrar outras tags, extraia-as mesmo assim
+    4. Se não encontrar nenhuma tag, considere toda a mensagem como feature_snippet
+    
+    ## FORMATO DE SAÍDA
+    
+    Retorne um JSON com os campos extraídos:
+    ```json
+    {
+      "feature_snippet": "descrição da feature extraída",
+      "especificacao_tecnica_da_ui": "conteúdo extraído ou null",
+      "contexto_api": "conteúdo extraído ou null",
+      "fonte_da_verdade_ux": "conteúdo extraído ou null",
+      "extraction_status": "success" ou "no_feature_found"
+    }
+    ```
+    
+    ## IMPORTANTE
+    - Sempre defina feature_snippet se houver qualquer pedido de implementação
+    - Defina extraction_status como "success" se encontrou uma feature
+    - Defina extraction_status como "no_feature_found" apenas se não há nada para implementar
+    """,
+    output_key="extracted_input"
+)
+
+# --- PIPELINE DEFINITIONS ---
+
+planning_pipeline = SequentialAgent(
+    name="planning_pipeline",
+    description="Creates comprehensive implementation plan for a feature.",
     sub_agents=[
-        section_planner,
-        section_researcher,
+        context_synthesizer,
         LoopAgent(
-            name="iterative_refinement_loop",
-            max_iterations=config.max_search_iterations,
+            name="plan_review_loop",
+            max_iterations=3,
             sub_agents=[
-                research_evaluator,
-                EscalationChecker(name="escalation_checker"),
-                enhanced_search_executor,
+                feature_planner,  # Cria ou refaz o plano
+                plan_reviewer,    # Revisa o plano
+                EscalationChecker(name="plan_escalation_checker"),
             ],
         ),
-        report_composer,
     ],
 )
 
-interactive_planner_agent = LlmAgent(
-    name="interactive_planner_agent",
-    model=config.worker_model,
-    description="The primary research assistant. It collaborates with the user to create a research plan, and then executes it upon approval.",
-    instruction=f"""
-    You are a research planning assistant. Your primary function is to convert ANY user request into a research plan.
-
-    **CRITICAL RULE: Never answer a question directly or refuse a request.** Your one and only first step is to use the `plan_generator` tool to propose a research plan for the user's topic.
-    If the user asks a question, you MUST immediately call `plan_generator` to create a plan to answer the question.
-
-    Your workflow is:
-    1.  **Plan:** Use `plan_generator` to create a draft plan and present it to the user.
-    2.  **Refine:** Incorporate user feedback until the plan is approved.
-    3.  **Execute:** Once the user gives EXPLICIT approval (e.g., "looks good, run it"), you MUST delegate the task to the `research_pipeline` agent, passing the approved plan.
-
-    Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
-    Do not perform any research yourself. Your job is to Plan, Refine, and Delegate.
-    """,
-    sub_agents=[research_pipeline],
-    tools=[AgentTool(plan_generator)],
-    output_key="research_plan",
+# Task execution loop - processa uma tarefa por vez
+task_execution_loop = LoopAgent(
+    name="task_execution_loop",
+    max_iterations=20,  # Máximo de 20 tarefas por feature
+    sub_agents=[
+        task_manager,  # Prepara contexto da tarefa atual
+        code_generator,  # Gera código
+        LoopAgent(
+            name="code_review_loop",
+            max_iterations=3,
+            sub_agents=[
+                code_reviewer,
+                EscalationChecker(name="code_escalation_checker"),
+                code_refiner,
+            ],
+        ),
+        code_approver,  # Salva código aprovado
+        TaskCompletionChecker(name="task_completion_checker"),  # Verifica se há mais tarefas
+    ],
 )
 
-root_agent = interactive_planner_agent
+execution_pipeline = SequentialAgent(
+    name="execution_pipeline",
+    description="Executes approved implementation plan, generating code for each task.",
+    sub_agents=[
+        EnhancedStatusReporter(name="status_reporter_start"),     # Status inicial
+        task_execution_loop,
+        EnhancedStatusReporter(name="status_reporter_assembly"),  # Status pré-assembly
+        final_assembler,
+        EnhancedStatusReporter(name="status_reporter_final"),     # Status final
+    ],
+)
+
+# --- COMPLETE PIPELINE WITH INPUT PROCESSING ---
+
+complete_pipeline = SequentialAgent(
+    name="complete_pipeline",
+    description="Complete pipeline from input processing to code generation",
+    sub_agents=[
+        input_processor,        # Primeiro processa o input
+        planning_pipeline,      # Depois planeja
+        execution_pipeline      # Por fim executa
+    ]
+)
+
+# --- MAIN ORCHESTRATOR ---
+
+class FeatureOrchestrator(BaseAgent):
+    def __init__(self, complete_pipeline: BaseAgent):
+        super().__init__(
+            name="FeatureOrchestrator",
+            description="Orchestrates the complete Flutter feature implementation flow."
+        )
+        self._complete_pipeline = complete_pipeline
+        self._has_processed = False
+    
+    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
+        # Verifica se já processou para evitar loops
+        if self._has_processed:
+            yield Event(
+                author=self.name,
+                content=Content(parts=[Part(text="Processamento concluído.")])
+            )
+            return
+        
+        # Marca como processado
+        self._has_processed = True
+        
+        # Inicia o processamento
+        yield Event(
+            author=self.name,
+            content=Content(parts=[Part(text="Iniciando processamento da solicitação...")])
+        )
+        
+        # Executa o pipeline completo
+        async for event in self.run_child(self._complete_pipeline, ctx):
+            yield event
+        
+        # Verifica o resultado final
+        if "final_code_delivery" in ctx.session.state:
+            yield Event(
+                author=self.name,
+                content=Content(parts=[Part(text="✅ Feature implementada com sucesso!")])
+            )
+        elif "feature_snippet" not in ctx.session.state:
+            yield Event(
+                author=self.name,
+                content=Content(parts=[Part(text="Por favor, forneça uma descrição clara da feature a ser implementada.")])
+            )
+        
+        # Reset para próxima execução
+        self._has_processed = False
+
+
+# A nova raiz do agente
+root_agent = FeatureOrchestrator(
+    complete_pipeline=complete_pipeline
+)
