@@ -23,10 +23,8 @@ from google.adk.agents import BaseAgent, LlmAgent, LoopAgent, SequentialAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
-from google.adk.planners import BuiltInPlanner
 from google.adk.tools import google_search
 from google.adk.tools.agent_tool import AgentTool
-from google.genai import types as genai_types
 from google.genai.types import Content, Part
 from pydantic import BaseModel, Field
 
@@ -58,35 +56,23 @@ class Feedback(BaseModel):
 
 
 class ImplementationTask(BaseModel):
-    """A single, concrete coding task within a larger feature implementation plan."""
+    """Task within an implementation plan."""
 
     id: str = Field(description="Unique identifier for the task, e.g., 'TASK-001'.")
-    category: Literal["MODEL", "PROVIDER", "WIDGET", "SERVICE", "UTIL"] = Field(
-        description="The architectural layer of the component."
-    )
+    category: Literal["MODEL", "PROVIDER", "WIDGET", "SERVICE", "UTIL"]
     title: str = Field(description="A short, descriptive title for the task.")
     description: str = Field(description="Detailed description of what to implement.")
-    file_path: str = Field(
-        description="The full path where the file should be created or modified."
-    )
-    action: Literal["CREATE", "MODIFY", "EXTEND"] = Field(
-        description="The type of file operation to perform."
-    )
-    dependencies: list[str] = Field(
-        description="A list of task IDs that must be completed before this one."
-    )
+    file_path: str = Field(description="The full path where the file should be created or modified.")
+    action: Literal["CREATE", "MODIFY", "EXTEND"]
+    dependencies: list[str] = Field(description="A list of task IDs that must be completed before this one.")
 
 
 class ImplementationPlan(BaseModel):
-    """A structured, detailed plan for implementing a new feature."""
+    """Structured plan produced by the planner agent."""
 
     feature_name: str = Field(description="A descriptive name for the entire feature.")
-    estimated_time: str = Field(
-        description="A high-level time estimate, e.g., '2-3 hours'."
-    )
-    implementation_tasks: list[ImplementationTask] = Field(
-        description="A list of all the tasks required to implement the feature."
-    )
+    estimated_time: str = Field(description="A high-level time estimate, e.g., '2-3 hours'.")
+    implementation_tasks: list[ImplementationTask]
 
 
 # --- Callbacks ---
@@ -135,6 +121,33 @@ def unpack_extracted_input_callback(callback_context: CallbackContext) -> None:
                     callback_context.state[key] = value
         except (json.JSONDecodeError, IndexError):
             pass
+
+
+def make_failure_handler(state_key: str, reason: str):
+    """Creates a callback that marks a failure if the review result isn't pass."""
+
+    def _callback(callback_context: CallbackContext) -> None:
+        result = callback_context.state.get(state_key)
+        if isinstance(result, dict):
+            grade = result.get("grade")
+        else:
+            grade = result
+        if grade != "pass":
+            callback_context.state[f"{state_key}_failed"] = True
+            callback_context.state[f"{state_key}_failure_reason"] = reason
+
+    return _callback
+
+
+def task_execution_failure_handler(callback_context: CallbackContext) -> None:
+    """Marks failure if task loop ends before completing all tasks."""
+    tasks = callback_context.state.get("implementation_tasks", [])
+    index = callback_context.state.get("current_task_index", 0)
+    if index < len(tasks):
+        callback_context.state["task_execution_failed"] = True
+        callback_context.state[
+            "task_execution_failure_reason"
+        ] = "Limite de tentativas atingido antes de completar todas as tarefas."
 
 
 # --- Custom Agent for Loop Control ---
@@ -923,6 +936,10 @@ planning_pipeline = SequentialAgent(
                     review_key="plan_review_result",
                 ),
             ],
+            after_agent_callback=make_failure_handler(
+                "plan_review_result",
+                "Não foi possível atender aos critérios de revisão após 3 tentativas.",
+            ),
         ),
     ],
 )
@@ -945,6 +962,10 @@ task_execution_loop = LoopAgent(
                 ),
                 code_refiner,
             ],
+            after_agent_callback=make_failure_handler(
+                "code_review_result",
+                "Não foi possível atender aos critérios de revisão de código após 3 tentativas.",
+            ),
         ),
         code_approver,  # Salva código aprovado
         TaskIncrementer(name="task_incrementer"),
@@ -952,6 +973,7 @@ task_execution_loop = LoopAgent(
             name="task_completion_checker"
         ),  # Verifica se há mais tarefas
     ],
+    after_agent_callback=task_execution_failure_handler,
 )
 
 execution_pipeline = SequentialAgent(
@@ -991,62 +1013,53 @@ class FeatureOrchestrator(BaseAgent):
         )
         self._complete_pipeline = complete_pipeline
 
-    async def _run_async_impl(
-        self, ctx: InvocationContext
-    ) -> AsyncGenerator[Event, None]:
-        # Use o estado da sessão para controle de nova execução
-        if ctx.session.state.get("orchestrator_has_run"):
+    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
+        state = ctx.session.state
+
+        if state.get("orchestrator_has_run"):
             yield Event(
                 author=self.name,
-                content=Content(
-                    parts=[
-                        Part(
-                            text="Processamento já concluído para esta sessão."
-                        )
-                    ]
-                ),
+                content=Content(parts=[Part(text="Processamento concluído.")])
             )
             return
 
-        # Marcar como processado na sessão
-        ctx.session.state["orchestrator_has_run"] = True
+        state["orchestrator_has_run"] = True
 
-        # Inicia o processamento
         yield Event(
             author=self.name,
-            content=Content(
-                parts=[Part(text="Iniciando processamento da solicitação...")]
-            ),
+            content=Content(parts=[Part(text="Iniciando processamento da solicitação...")])
         )
 
-        # Executa o pipeline completo
         async for event in self._complete_pipeline.run_async(ctx):
             yield event
 
-        # Verifica o resultado final
-        if "final_code_delivery" in ctx.session.state:
+        if state.get("plan_review_result_failed"):
             yield Event(
                 author=self.name,
-                content=Content(
-                    parts=[Part(text="✅ Feature implementada com sucesso!")]
-                ),
+                content=Content(parts=[Part(text=state.get("plan_review_result_failure_reason", "Falha no plano."))])
             )
-        elif "feature_snippet" not in ctx.session.state:
+        elif state.get("code_review_result_failed"):
             yield Event(
                 author=self.name,
-                content=Content(
-                    parts=[
-                        Part(
-                            text="Por favor, forneça uma descrição clara da"
-                            " feature a ser implementada."
-                        )
-                    ]
-                ),
+                content=Content(parts=[Part(text=state.get("code_review_result_failure_reason", "Falha na revisão de código."))])
+            )
+        elif state.get("task_execution_failed"):
+            yield Event(
+                author=self.name,
+                content=Content(parts=[Part(text=state.get("task_execution_failure_reason", "Falha na execução das tarefas."))])
+            )
+        elif "final_code_delivery" in state:
+            yield Event(
+                author=self.name,
+                content=Content(parts=[Part(text="✅ Feature implementada com sucesso!")])
+            )
+        elif "feature_snippet" not in state:
+            yield Event(
+                author=self.name,
+                content=Content(parts=[Part(text="Por favor, forneça uma descrição clara da feature a ser implementada.")])
             )
 
-        # Opcional: Resetar a flag no final para permitir nova execução na mesma sessão
-        ctx.session.state["orchestrator_has_run"] = False
-
+        state["orchestrator_has_run"] = False
 
 # A nova raiz do agente
 root_agent = FeatureOrchestrator(
