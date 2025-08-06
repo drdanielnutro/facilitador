@@ -11,6 +11,21 @@ authors = [
 ]
 dependencies = [
     "google-adk==1.4.2",
+    "pydantic>=2.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "google-cloud-logging>=3.5.0",
+    "google-cloud-storage>=2.10.0",
+    "google-auth>=2.23.0",
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "streamlit>=1.28.0",
+    "langchain-core>=0.1.0",
+    "langchain-google-vertexai>=0.1.0",
+    "streamlit-feedback>=0.1.0",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "vertexai>=1.40.0",
 ]
 
 requires-python = ">=3.10,<3.13"
@@ -20,6 +35,7 @@ dev = [
     "pytest~=8.3.2",
     "pytest-asyncio~=0.23.7",
     "nest-asyncio>=1.6.0",
+    "locust>=2.17.0",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +50,13 @@ lint = [
     "codespell~=2.2.0",
     "types-pyyaml~=6.0.12.20240917",
     "types-requests~=2.32.0.20240914",
+]
+
+frontend = [
+    "streamlit>=1.28.0",
+    "streamlit-feedback>=0.1.0",
+    "langchain-core>=0.1.0",
+    "langchain-google-vertexai>=0.1.0",
 ]
 
 [tool.ruff]
