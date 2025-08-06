@@ -59,7 +59,7 @@ Estes são bugs que causarão falhas garantidas na execução do pipeline ou que
 
 #### **1.2. Bug de Concorrência no Orquestrador Principal**
 
-*   **Status:** **PENDENTE**
+*   **Status:** **TOTALMENTE IMPLEMENTADO**
 *   **O Problema:** A classe `FeatureOrchestrator` utiliza uma variável de instância (`self._has_processed`) para controlar se a execução já ocorreu. Em um ambiente de servidor que lida com múltiplos usuários ou sessões simultaneamente, esta variável de estado será compartilhada por todas as execuções. Isso significa que, uma vez que o primeiro usuário execute o agente, ele se tornará inutilizável para todos os outros.
 *   **Solução Proposta:** Mover o controle de estado da instância do agente para o `ctx.session.state`, que é único para cada sessão de conversa.
 
@@ -170,7 +170,7 @@ Estes problemas não causam uma falha garantida, mas tornam o agente frágil e s
 
 #### **2.1. Geração de JSON sem Validação de Esquema**
 
-*   **Status:** **PENDENTE**
+*   **Status:** **TOTALMENTE IMPLEMENTADO**
 *   **O Problema:** O agente `feature_planner` é instruído a gerar uma estrutura JSON complexa, mas não possui um `output_schema` Pydantic para forçar e validar o formato. LLMs podem facilmente gerar JSONs inválidos (ex: vírgula extra, chave sem aspas), o que causaria um erro de parsing e interromperia o pipeline.
 *   **Solução Proposta:** Definir modelos Pydantic para a estrutura do plano de implementação e atribuí-los ao parâmetro `output_schema` do agente `feature_planner`.
 

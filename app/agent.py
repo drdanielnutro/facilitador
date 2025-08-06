@@ -57,6 +57,23 @@ class Feedback(BaseModel):
     )
 
 
+class ImplementationTask(BaseModel):
+    """Model for a single implementation task."""
+    id: str = Field(description="Unique identifier for the task, e.g., 'TASK-001'.")
+    category: Literal["MODEL", "PROVIDER", "WIDGET", "SERVICE", "UTIL"]
+    title: str = Field(description="A short, descriptive title for the task.")
+    description: str = Field(description="Detailed description of what to implement.")
+    file_path: str = Field(description="The full path where the file should be created or modified.")
+    action: Literal["CREATE", "MODIFY", "EXTEND"]
+    dependencies: list[str] = Field(description="A list of task IDs that must be completed before this one.")
+
+class ImplementationPlan(BaseModel):
+    """Model for the entire implementation plan."""
+    feature_name: str = Field(description="A descriptive name for the entire feature.")
+    estimated_time: str = Field(description="A high-level time estimate, e.g., '2-3 hours'.")
+    implementation_tasks: list[ImplementationTask]
+
+
 # --- Callbacks ---
 def collect_code_snippets_callback(callback_context: CallbackContext) -> None:
     """Collects approved code snippets throughout the execution pipeline."""
@@ -354,6 +371,7 @@ feature_planner = LlmAgent(
     model=config.worker_model,
     name="feature_planner",
     description="Creates a detailed, actionable implementation plan with concrete coding tasks.",
+    output_schema=ImplementationPlan,
     instruction="""
     ## IDENTIDADE: Flutter Tech Lead
     
@@ -372,36 +390,7 @@ feature_planner = LlmAgent(
     3. Especifique exatamente qual arquivo criar ou modificar
     4. Inclua descrição clara do que implementar
 
-    ## FORMATO DE SAÍDA (JSON)
-    ```json
-    {
-      "feature_name": "Nome descritivo da feature",
-      "estimated_time": "2-3 horas",
-      "implementation_tasks": [
-        {
-          "id": "TASK-001",
-          "category": "MODEL",
-          "title": "Criar modelo de estado",
-          "description": "Implementar FeatureState com Freezed incluindo campos: isLoading, errorMessage, data",
-          "file_path": "lib/features/feature_name/models/feature_state.dart",
-          "action": "CREATE",
-          "dependencies": []
-        },
-        {
-          "id": "TASK-002",
-          "category": "PROVIDER",
-          "title": "Implementar StateNotifier",
-          "description": "Criar FeatureNotifier extending StateNotifier<FeatureState> com métodos para gerenciar estado",
-          "file_path": "lib/features/feature_name/providers/feature_provider.dart",
-          "action": "CREATE",
-          "dependencies": ["TASK-001"]
-        }
-      ]
-    }
-    ```
-
-    **CATEGORIAS VÁLIDAS**: MODEL, PROVIDER, WIDGET, SERVICE, UTIL
-    **AÇÕES VÁLIDAS**: CREATE, MODIFY, EXTEND
+    
     """,
     output_key="implementation_plan",
 )
@@ -963,19 +952,18 @@ class FeatureOrchestrator(BaseAgent):
             description="Orchestrates the complete Flutter feature implementation flow."
         )
         self._complete_pipeline = complete_pipeline
-        self._has_processed = False
     
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        # Verifica se já processou para evitar loops
-        if self._has_processed:
+        # Use session state for control to avoid concurrency issues
+        if ctx.session.state.get("orchestrator_has_run"):
             yield Event(
                 author=self.name,
-                content=Content(parts=[Part(text="Processamento concluído.")])
+                content=Content(parts=[Part(text="Processamento já concluído para esta sessão.")])
             )
             return
         
-        # Marca como processado
-        self._has_processed = True
+        # Mark as processed in the session
+        ctx.session.state["orchestrator_has_run"] = True
         
         # Inicia o processamento
         yield Event(
@@ -999,8 +987,8 @@ class FeatureOrchestrator(BaseAgent):
                 content=Content(parts=[Part(text="Por favor, forneça uma descrição clara da feature a ser implementada.")])
             )
         
-        # Reset para próxima execução
-        self._has_processed = False
+        # Optional: Reset the flag at the end to allow re-running in the same session
+        ctx.session.state["orchestrator_has_run"] = False
 
 
 # A nova raiz do agente
