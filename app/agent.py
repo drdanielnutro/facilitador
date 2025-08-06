@@ -57,6 +57,38 @@ class Feedback(BaseModel):
     )
 
 
+class ImplementationTask(BaseModel):
+    """A single, concrete coding task within a larger feature implementation plan."""
+
+    id: str = Field(description="Unique identifier for the task, e.g., 'TASK-001'.")
+    category: Literal["MODEL", "PROVIDER", "WIDGET", "SERVICE", "UTIL"] = Field(
+        description="The architectural layer of the component."
+    )
+    title: str = Field(description="A short, descriptive title for the task.")
+    description: str = Field(description="Detailed description of what to implement.")
+    file_path: str = Field(
+        description="The full path where the file should be created or modified."
+    )
+    action: Literal["CREATE", "MODIFY", "EXTEND"] = Field(
+        description="The type of file operation to perform."
+    )
+    dependencies: list[str] = Field(
+        description="A list of task IDs that must be completed before this one."
+    )
+
+
+class ImplementationPlan(BaseModel):
+    """A structured, detailed plan for implementing a new feature."""
+
+    feature_name: str = Field(description="A descriptive name for the entire feature.")
+    estimated_time: str = Field(
+        description="A high-level time estimate, e.g., '2-3 hours'."
+    )
+    implementation_tasks: list[ImplementationTask] = Field(
+        description="A list of all the tasks required to implement the feature."
+    )
+
+
 # --- Callbacks ---
 def collect_code_snippets_callback(callback_context: CallbackContext) -> None:
     """Collects approved code snippets throughout the execution pipeline."""
@@ -403,6 +435,7 @@ feature_planner = LlmAgent(
     **CATEGORIAS VÁLIDAS**: MODEL, PROVIDER, WIDGET, SERVICE, UTIL
     **AÇÕES VÁLIDAS**: CREATE, MODIFY, EXTEND
     """,
+    output_schema=ImplementationPlan,
     output_key="implementation_plan",
 )
 
@@ -461,9 +494,6 @@ code_generator = LlmAgent(
     model=config.worker_model,
     name="code_generator",
     description="Generates production-ready Flutter/Dart code for a single task.",
-    planner=BuiltInPlanner(
-        thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
-    ),
     instruction="""
     ## IDENTIDADE: Senior Flutter Developer
     
@@ -595,9 +625,6 @@ code_refiner = LlmAgent(
     model=config.worker_model,
     name="code_refiner",
     description="Refines code based on review feedback.",
-    planner=BuiltInPlanner(
-        thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
-    ),
     instruction="""
     ## IDENTIDADE: Code Refinement Specialist
     
@@ -960,47 +987,65 @@ class FeatureOrchestrator(BaseAgent):
     def __init__(self, complete_pipeline: BaseAgent):
         super().__init__(
             name="FeatureOrchestrator",
-            description="Orchestrates the complete Flutter feature implementation flow."
+            description="Orchestrates the complete Flutter feature implementation flow.",
         )
         self._complete_pipeline = complete_pipeline
-        self._has_processed = False
-    
-    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        # Verifica se já processou para evitar loops
-        if self._has_processed:
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        # Use o estado da sessão para controle de nova execução
+        if ctx.session.state.get("orchestrator_has_run"):
             yield Event(
                 author=self.name,
-                content=Content(parts=[Part(text="Processamento concluído.")])
+                content=Content(
+                    parts=[
+                        Part(
+                            text="Processamento já concluído para esta sessão."
+                        )
+                    ]
+                ),
             )
             return
-        
-        # Marca como processado
-        self._has_processed = True
-        
+
+        # Marcar como processado na sessão
+        ctx.session.state["orchestrator_has_run"] = True
+
         # Inicia o processamento
         yield Event(
             author=self.name,
-            content=Content(parts=[Part(text="Iniciando processamento da solicitação...")])
+            content=Content(
+                parts=[Part(text="Iniciando processamento da solicitação...")]
+            ),
         )
-        
+
         # Executa o pipeline completo
         async for event in self._complete_pipeline.run_async(ctx):
             yield event
-        
+
         # Verifica o resultado final
         if "final_code_delivery" in ctx.session.state:
             yield Event(
                 author=self.name,
-                content=Content(parts=[Part(text="✅ Feature implementada com sucesso!")])
+                content=Content(
+                    parts=[Part(text="✅ Feature implementada com sucesso!")]
+                ),
             )
         elif "feature_snippet" not in ctx.session.state:
             yield Event(
                 author=self.name,
-                content=Content(parts=[Part(text="Por favor, forneça uma descrição clara da feature a ser implementada.")])
+                content=Content(
+                    parts=[
+                        Part(
+                            text="Por favor, forneça uma descrição clara da"
+                            " feature a ser implementada."
+                        )
+                    ]
+                ),
             )
-        
-        # Reset para próxima execução
-        self._has_processed = False
+
+        # Opcional: Resetar a flag no final para permitir nova execução na mesma sessão
+        ctx.session.state["orchestrator_has_run"] = False
 
 
 # A nova raiz do agente
