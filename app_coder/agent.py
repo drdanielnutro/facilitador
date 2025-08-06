@@ -182,7 +182,7 @@ class EnhancedStatusReporter(BaseAgent):
                 if isinstance(review_result, dict):
                     review_status = review_result.get("grade", "Pendente").upper()
 
-            return f\"\"\"🔄 **EXECUTANDO: {task_index + 1}/{len(tasks)} tarefas**
+            return f"""🔄 **EXECUTANDO: {task_index + 1}/{len(tasks)} tarefas**
 
 **Progresso:** [{progress_bar}] {progress:.1%}
 
@@ -191,7 +191,7 @@ class EnhancedStatusReporter(BaseAgent):
 
 **Tempo Estimado:** ~{estimated_minutes} minutos restantes
 
-**Última Revisão:** {review_status}\"\"\"
+**Última Revisão:** {review_status}"""
 
         # Montando resultado final
         return "🔄 **FINALIZANDO**\nMontando documentação e código final..."
