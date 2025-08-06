@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import datetime
+import json
 import logging
 import re
 from collections.abc import AsyncGenerator
@@ -77,42 +78,55 @@ def collect_code_snippets_callback(callback_context: CallbackContext) -> None:
     callback_context.state["approved_code_snippets"] = code_snippets
 
 
-def task_iteration_callback(callback_context: CallbackContext) -> None:
-    """Manages iteration through tasks in the implementation plan."""
-    # Get current task index
-    task_index = callback_context.state.get("current_task_index", 0)
-    tasks = callback_context.state.get("implementation_tasks", [])
-    
-    if task_index < len(tasks):
-        # Set up current task for processing
-        current_task = tasks[task_index]
-        callback_context.state["current_task_info"] = current_task
-        callback_context.state["current_task_description"] = current_task["description"]
-        logging.info(f"Processing task {task_index + 1}/{len(tasks)}: {current_task['description']}")
-    
-    # Increment for next iteration
-    callback_context.state["current_task_index"] = task_index + 1
+
+
+def unpack_extracted_input_callback(callback_context: CallbackContext) -> None:
+    """Unpacks the extracted_input dictionary into the session state."""
+    if "extracted_input" in callback_context.state:
+        extracted_input_str = callback_context.state["extracted_input"]
+        try:
+            if isinstance(extracted_input_str, str):
+                if "```json" in extracted_input_str:
+                    extracted_input_str = (
+                        extracted_input_str.split("```json")[1]
+                        .split("```")[0]
+                        .strip()
+                    )
+                extracted_input = json.loads(extracted_input_str)
+            elif isinstance(extracted_input_str, dict):
+                extracted_input = extracted_input_str
+            else:
+                return
+
+            if isinstance(extracted_input, dict):
+                for key, value in extracted_input.items():
+                    callback_context.state[key] = value
+        except (json.JSONDecodeError, IndexError):
+            pass
 
 
 # --- Custom Agent for Loop Control ---
 class EscalationChecker(BaseAgent):
-    """Checks research evaluation and escalates to stop the loop if grade is 'pass'."""
+    """Checks evaluation and escalates to stop the loop if grade is 'pass'."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, review_key: str):
         super().__init__(name=name)
+        self._review_key = review_key
 
     async def _run_async_impl(
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
-        evaluation_result = ctx.session.state.get("code_review_result")
+        evaluation_result = ctx.session.state.get(self._review_key)
         if evaluation_result and evaluation_result.get("grade") == "pass":
             logging.info(
-                f"[{self.name}] Code review passed. Escalating to stop loop."
+                f"[{self.name}] Review for '{self._review_key}' passed."
+                " Escalating to stop loop."
             )
             yield Event(author=self.name, actions=EventActions(escalate=True))
         else:
             logging.info(
-                f"[{self.name}] Code review failed. Loop will continue."
+                f"[{self.name}] Review for '{self._review_key}' failed. Loop"
+                " will continue."
             )
             yield Event(author=self.name)
 
@@ -201,6 +215,74 @@ class EnhancedStatusReporter(BaseAgent):
         return "🔄 **FINALIZANDO**\nMontando documentação e código final..."
 
 
+class TaskInitializer(BaseAgent):
+    """Initializes the task index and total task count."""
+
+    def __init__(self, name: str):
+        super().__init__(name=name)
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        tasks = ctx.session.state.get("implementation_tasks", [])
+        ctx.session.state["current_task_index"] = 0
+        ctx.session.state["total_tasks"] = len(tasks)
+        yield Event(author=self.name)
+
+
+class TaskManager(BaseAgent):
+    """Selects the current task and puts it into the state."""
+
+    def __init__(self, name: str):
+        super().__init__(name=name)
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        task_index = ctx.session.state.get("current_task_index", 0)
+        tasks = ctx.session.state.get("implementation_tasks", [])
+
+        if task_index < len(tasks):
+            current_task = tasks[task_index]
+            ctx.session.state["current_task_info"] = current_task
+            ctx.session.state["current_task_description"] = current_task[
+                "description"
+            ]
+            logging.info(
+                "Processing task %d/%d: %s",
+                task_index + 1,
+                len(tasks),
+                current_task["description"],
+            )
+            yield Event(
+                author=self.name,
+                content=Content(
+                    parts=[
+                        Part(
+                            text=f"Starting task:"
+                            f" {current_task['description']}"
+                        )
+                    ]
+                ),
+            )
+        else:
+            yield Event(author=self.name, actions=EventActions(escalate=True))
+
+
+class TaskIncrementer(BaseAgent):
+    """Increments the task index."""
+
+    def __init__(self, name: str):
+        super().__init__(name=name)
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        task_index = ctx.session.state.get("current_task_index", 0)
+        ctx.session.state["current_task_index"] = task_index + 1
+        yield Event(author=self.name)
+
+
 # --- PLANNING PIPELINE AGENTS ---
 
 context_synthesizer = LlmAgent(
@@ -210,37 +292,36 @@ context_synthesizer = LlmAgent(
     instruction="""
     ## IDENTIDADE: Context Synthesizer
     
-    Você é um especialista em análise de documentação técnica. Sua função é extrair e sintetizar APENAS as informações relevantes dos três documentos de referência para a feature específica sendo implementada.
+    Você é um especialista em análise de documentação técnica. Sua função é extrair e sintetizar as informações relevantes dos documentos de referência para a feature específica sendo implementada. Se um documento não for fornecido, ignore-o.
 
     ## ENTRADA
     **Feature a Implementar:**
-    {{ feature_snippet? }}
+    {feature_snippet}
 
     ## DOCUMENTOS DE REFERÊNCIA
-    {{ if especificacao_tecnica_da_ui }}
-    - `especificacao_tecnica_da_ui`: Arquitetura técnica do app Flutter
-    {{ endif }}
-    {{ if contexto_api }}
-    - `contexto_api`: Documentação da API backend
-    {{ endif }}
-    {{ if fonte_da_verdade_ux }}
-    - `fonte_da_verdade_ux`: Especificação de UX/Design
-    {{ endif }}
+    ### Especificação Técnica da UI
+    {especificacao_tecnica_da_ui}
+
+    ### Contexto da API
+    {contexto_api}
+
+    ### Fonte da Verdade UX
+    {fonte_da_verdade_ux}
 
     ## SUA TAREFA
     Criar um "Feature Briefing" conciso e focado, extraindo:
 
-    ### 1. Da Especificação Técnica:
+    ### 1. Da Especificação Técnica (se disponível):
     - Padrões arquiteturais aplicáveis (Riverpod, json_dynamic_widget, etc.)
     - Estrutura de pastas e convenções
     - Dependências e bibliotecas relevantes
 
-    ### 2. Do Contexto da API:
+    ### 2. Do Contexto da API (se disponível):
     - Endpoints específicos necessários
     - Estruturas de request/response
     - Fluxo de autenticação se aplicável
 
-    ### 3. Da Fonte da Verdade UX:
+    ### 3. Da Fonte da Verdade UX (se disponível):
     - Fluxo exato de interação do usuário
     - Elementos visuais necessários
     - Estados e transições
@@ -375,30 +456,6 @@ plan_reviewer = LlmAgent(
 
 # --- EXECUTION PIPELINE AGENTS ---
 
-task_manager = LlmAgent(
-    model=config.worker_model,
-    name="task_manager",
-    description="Manages the current task being processed in the execution pipeline.",
-    instruction="""
-    ## IDENTIDADE: Task Manager
-    
-    Você é responsável por preparar o contexto para a execução de uma tarefa específica.
-
-    ## ESTADO ATUAL
-    **Task Index**: {current_task_index}
-    **Total Tasks**: {{ len(implementation_tasks) }}
-    **Current Task**: {current_task_info}
-
-    ## SUA TAREFA
-    1. Extraia a tarefa atual do plano
-    2. Prepare o contexto necessário para o code_generator
-    3. Atualize o estado para a próxima iteração
-
-    ## SAÍDA
-    Confirme qual tarefa está sendo processada e seu contexto.
-    """,
-    output_key="task_context",
-)
 
 code_generator = LlmAgent(
     model=config.worker_model,
@@ -817,7 +874,8 @@ input_processor = LlmAgent(
     - Defina extraction_status como "success" se encontrou uma feature
     - Defina extraction_status como "no_feature_found" apenas se não há nada para implementar
     """,
-    output_key="extracted_input"
+    output_key="extracted_input",
+    after_agent_callback=unpack_extracted_input_callback,
 )
 
 # --- PIPELINE DEFINITIONS ---
@@ -833,7 +891,10 @@ planning_pipeline = SequentialAgent(
             sub_agents=[
                 feature_planner,  # Cria ou refaz o plano
                 plan_reviewer,    # Revisa o plano
-                EscalationChecker(name="plan_escalation_checker"),
+                EscalationChecker(
+                    name="plan_escalation_checker",
+                    review_key="plan_review_result",
+                ),
             ],
         ),
     ],
@@ -844,19 +905,25 @@ task_execution_loop = LoopAgent(
     name="task_execution_loop",
     max_iterations=20,  # Máximo de 20 tarefas por feature
     sub_agents=[
-        task_manager,  # Prepara contexto da tarefa atual
+        TaskManager(name="task_manager"),
         code_generator,  # Gera código
         LoopAgent(
             name="code_review_loop",
             max_iterations=3,
             sub_agents=[
                 code_reviewer,
-                EscalationChecker(name="code_escalation_checker"),
+                EscalationChecker(
+                    name="code_escalation_checker",
+                    review_key="code_review_result",
+                ),
                 code_refiner,
             ],
         ),
         code_approver,  # Salva código aprovado
-        TaskCompletionChecker(name="task_completion_checker"),  # Verifica se há mais tarefas
+        TaskIncrementer(name="task_incrementer"),
+        TaskCompletionChecker(
+            name="task_completion_checker"
+        ),  # Verifica se há mais tarefas
     ],
 )
 
@@ -864,11 +931,14 @@ execution_pipeline = SequentialAgent(
     name="execution_pipeline",
     description="Executes approved implementation plan, generating code for each task.",
     sub_agents=[
-        EnhancedStatusReporter(name="status_reporter_start"),     # Status inicial
+        TaskInitializer(name="task_initializer"),
+        EnhancedStatusReporter(name="status_reporter_start"),  # Status inicial
         task_execution_loop,
-        EnhancedStatusReporter(name="status_reporter_assembly"),  # Status pré-assembly
+        EnhancedStatusReporter(
+            name="status_reporter_assembly"
+        ),  # Status pré-assembly
         final_assembler,
-        EnhancedStatusReporter(name="status_reporter_final"),     # Status final
+        EnhancedStatusReporter(name="status_reporter_final"),  # Status final
     ],
 )
 
@@ -914,7 +984,7 @@ class FeatureOrchestrator(BaseAgent):
         )
         
         # Executa o pipeline completo
-        async for event in self.run_child(self._complete_pipeline, ctx):
+        async for event in self._complete_pipeline.run_async(ctx):
             yield event
         
         # Verifica o resultado final
