@@ -59,7 +59,7 @@ Estes são bugs que causarão falhas garantidas na execução do pipeline ou que
 
 #### **1.2. Bug de Concorrência no Orquestrador Principal**
 
-*   **Status:** **PENDENTE**
+*   **Status:** **TOTALMENTE IMPLEMENTADO**
 *   **O Problema:** A classe `FeatureOrchestrator` utiliza uma variável de instância (`self._has_processed`) para controlar se a execução já ocorreu. Em um ambiente de servidor que lida com múltiplos usuários ou sessões simultaneamente, esta variável de estado será compartilhada por todas as execuções. Isso significa que, uma vez que o primeiro usuário execute o agente, ele se tornará inutilizável para todos os outros.
 *   **Solução Proposta:** Mover o controle de estado da instância do agente para o `ctx.session.state`, que é único para cada sessão de conversa.
 
@@ -170,7 +170,7 @@ Estes problemas não causam uma falha garantida, mas tornam o agente frágil e s
 
 #### **2.1. Geração de JSON sem Validação de Esquema**
 
-*   **Status:** **PENDENTE**
+*   **Status:** **TOTALMENTE IMPLEMENTADO**
 *   **O Problema:** O agente `feature_planner` é instruído a gerar uma estrutura JSON complexa, mas não possui um `output_schema` Pydantic para forçar e validar o formato. LLMs podem facilmente gerar JSONs inválidos (ex: vírgula extra, chave sem aspas), o que causaria um erro de parsing e interromperia o pipeline.
 *   **Solução Proposta:** Definir modelos Pydantic para a estrutura do plano de implementação e atribuí-los ao parâmetro `output_schema` do agente `feature_planner`.
 
@@ -207,7 +207,7 @@ Estes problemas não causam uma falha garantida, mas tornam o agente frágil e s
 
 #### **3.1. Limites de Iteração Rígidos**
 
-*   **Status:** **PENDENTE**
+*   **Status:** **TOTALMENTE IMPLEMENTADO**
 *   **O Problema:** Os loops de revisão (`max_iterations=3`) e de tarefas (`max_iterations=20`) possuem limites fixos. Uma tarefa ou plano complexo que exija mais rodadas de refinamento causará uma falha no loop, abortando todo o processo.
 *   **Solução Proposta:** Implementar uma estratégia de falha mais inteligente. Se `max_iterations` for atingido, o agente poderia:
     1.  Marcar a tarefa/plano como "falhou" no estado.
@@ -217,17 +217,17 @@ Estes problemas não causam uma falha garantida, mas tornam o agente frágil e s
 
 #### **3.2. Uso de `planner` em Agentes de Geração Direta**
 
-*   **Status:** **PENDENTE**
+*   **Status:** **TOTALMENTE IMPLEMENTADO**
 *   **O Problema:** Os agentes `code_generator` e `code_refiner` estão configurados com um `BuiltInPlanner`. No entanto, suas instruções são muito diretas e focadas na geração de código. O planner pode adicionar uma sobrecarga de processamento (latência e custo) ao "pensar" sobre uma tarefa que não requer planejamento complexo.
 *   **Solução Proposta:** Testar a remoção do parâmetro `planner` desses dois agentes. É provável que a qualidade da saída não seja afetada para tarefas tão bem definidas, resultando em uma execução mais rápida e econômica.
 
 ---
 
-### **Ordem de Implementação Recomendada (Atualizada)**
+### **Status das Correções**
 
-A ordem de implementação foi atualizada para refletir as correções já aplicadas. A prioridade agora é resolver os problemas restantes, começando pelo bug mais crítico.
+Todos os problemas identificados foram corrigidos com sucesso:
 
-1.  **Corrigir o Bug de Concorrência (1.2):** **PRIORIDADE MÁXIMA.** Esta é a falha mais crítica pendente e impedirá que o agente funcione corretamente em um ambiente de produção ou com múltiplos acessos.
-2.  **Adicionar Validação de Esquema (2.1):** **ALTA PRIORIDADE.** Aumentará drasticamente a confiabilidade do agente, prevenindo falhas de parsing de JSON gerado pelo LLM.
-3.  **Remover Planners Desnecessários (3.2):** **MÉDIA PRIORIDADE.** Otimização de performance e custo com baixo risco de impacto na qualidade do resultado.
-4.  **Melhorar a Lógica de Iteração (3.1):** **BAIXA PRIORIDADE.** Melhoria de robustez para tornar o agente mais resiliente a casos complexos, mas não impede o funcionamento básico.
+1. **Bug de Concorrência (1.2):** Resolvido movendo o controle para `session.state`.
+2. **Validação de Esquema (2.1):** Modelos Pydantic adicionados ao `feature_planner`.
+3. **Lógica de Iteração (3.1):** Callbacks de falha implementados para loops.
+4. **Remoção de Planners (3.2):** `code_generator` e `code_refiner` agora operam sem `BuiltInPlanner`.
