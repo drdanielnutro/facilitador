@@ -116,6 +116,19 @@ def unpack_extracted_input_callback(callback_context: CallbackContext) -> None:
             if isinstance(extracted_input, dict):
                 for key, value in extracted_input.items():
                     callback_context.state[key] = value
+                
+                # Store original documents in a separate structure for selective access
+                docs = {}
+                if "especificacao_tecnica_da_ui" in callback_context.state:
+                    docs["ui_spec"] = callback_context.state.get("especificacao_tecnica_da_ui", "")
+                if "contexto_api" in callback_context.state:
+                    docs["api_context"] = callback_context.state.get("contexto_api", "")
+                if "fonte_da_verdade_ux" in callback_context.state:
+                    docs["ux_truth"] = callback_context.state.get("fonte_da_verdade_ux", "")
+                
+                if docs:
+                    callback_context.state["original_docs"] = docs
+                    logging.info(f"Stored original docs with keys: {list(docs.keys())}")
         except (json.JSONDecodeError, IndexError):
             pass
 
@@ -435,6 +448,9 @@ plan_reviewer = LlmAgent(
 
     **Feature Briefing:**
     {feature_briefing}
+    
+    **Requisitos UX Originais (Para Validação):**
+    {original_docs[ux_truth]}
 
     ## CRITÉRIOS DE AVALIAÇÃO
     1. **Completude**: O plano cobre todos os aspectos do briefing?
@@ -481,8 +497,11 @@ code_generator = LlmAgent(
     Você é um desenvolvedor Flutter sênior gerando código production-ready para UMA tarefa específica.
 
     ## CONTEXTO
-    **Feature Briefing:**
+    **Feature Briefing (Visão Geral):**
     {feature_briefing}
+    
+    **Documentação API Completa (Quando Disponível):**
+    {original_docs[api_context]}
 
     **Tarefa Atual:**
     {current_task_info}
@@ -547,6 +566,9 @@ code_reviewer = LlmAgent(
     ## CONTEXTO
     **Feature Briefing:**
     {feature_briefing}
+    
+    **Especificações UI Originais (Para Validação):**
+    {original_docs[ui_spec]}
 
     **Task Description:**
     {current_task_info}
