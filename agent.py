@@ -56,7 +56,8 @@ class Feedback(BaseModel):
 
 
 class ImplementationTask(BaseModel):
-    """Model for a single implementation task."""
+    """Task within an implementation plan."""
+
     id: str = Field(description="Unique identifier for the task, e.g., 'TASK-001'.")
     category: Literal["MODEL", "PROVIDER", "WIDGET", "SERVICE", "UTIL"]
     title: str = Field(description="A short, descriptive title for the task.")
@@ -65,8 +66,10 @@ class ImplementationTask(BaseModel):
     action: Literal["CREATE", "MODIFY", "EXTEND"]
     dependencies: list[str] = Field(description="A list of task IDs that must be completed before this one.")
 
+
 class ImplementationPlan(BaseModel):
-    """Model for the entire implementation plan."""
+    """Structured plan produced by the planner agent."""
+
     feature_name: str = Field(description="A descriptive name for the entire feature.")
     estimated_time: str = Field(description="A high-level time estimate, e.g., '2-3 hours'.")
     implementation_tasks: list[ImplementationTask]
@@ -396,7 +399,6 @@ feature_planner = LlmAgent(
     model=config.worker_model,
     name="feature_planner",
     description="Creates a detailed, actionable implementation plan with concrete coding tasks.",
-    output_schema=ImplementationPlan,
     instruction="""
     ## IDENTIDADE: Flutter Tech Lead
     
@@ -415,8 +417,38 @@ feature_planner = LlmAgent(
     3. Especifique exatamente qual arquivo criar ou modificar
     4. Inclua descrição clara do que implementar
 
-    
+    ## FORMATO DE SAÍDA (JSON)
+    ```json
+    {
+      "feature_name": "Nome descritivo da feature",
+      "estimated_time": "2-3 horas",
+      "implementation_tasks": [
+        {
+          "id": "TASK-001",
+          "category": "MODEL",
+          "title": "Criar modelo de estado",
+          "description": "Implementar FeatureState com Freezed incluindo campos: isLoading, errorMessage, data",
+          "file_path": "lib/features/feature_name/models/feature_state.dart",
+          "action": "CREATE",
+          "dependencies": []
+        },
+        {
+          "id": "TASK-002",
+          "category": "PROVIDER",
+          "title": "Implementar StateNotifier",
+          "description": "Criar FeatureNotifier extending StateNotifier<FeatureState> com métodos para gerenciar estado",
+          "file_path": "lib/features/feature_name/providers/feature_provider.dart",
+          "action": "CREATE",
+          "dependencies": ["TASK-001"]
+        }
+      ]
+    }
+    ```
+
+    **CATEGORIAS VÁLIDAS**: MODEL, PROVIDER, WIDGET, SERVICE, UTIL
+    **AÇÕES VÁLIDAS**: CREATE, MODIFY, EXTEND
     """,
+    output_schema=ImplementationPlan,
     output_key="implementation_plan",
 )
 
@@ -977,62 +1009,57 @@ class FeatureOrchestrator(BaseAgent):
     def __init__(self, complete_pipeline: BaseAgent):
         super().__init__(
             name="FeatureOrchestrator",
-            description="Orchestrates the complete Flutter feature implementation flow."
+            description="Orchestrates the complete Flutter feature implementation flow.",
         )
         self._complete_pipeline = complete_pipeline
-    
+
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        # Use session state for control to avoid concurrency issues
-        if ctx.session.state.get("orchestrator_has_run"):
+        state = ctx.session.state
+
+        if state.get("orchestrator_has_run"):
             yield Event(
                 author=self.name,
-                content=Content(parts=[Part(text="Processamento já concluído para esta sessão.")])
+                content=Content(parts=[Part(text="Processamento concluído.")])
             )
             return
-        
-        # Mark as processed in the session
-        ctx.session.state["orchestrator_has_run"] = True
-        
-        # Inicia o processamento
+
+        state["orchestrator_has_run"] = True
+
         yield Event(
             author=self.name,
             content=Content(parts=[Part(text="Iniciando processamento da solicitação...")])
         )
-        
-        # Executa o pipeline completo
+
         async for event in self._complete_pipeline.run_async(ctx):
             yield event
-        
-        # Verifica falhas específicas e fornece feedback apropriado
-        if ctx.session.state.get("plan_review_result_failed"):
+
+        if state.get("plan_review_result_failed"):
             yield Event(
                 author=self.name,
-                content=Content(parts=[Part(text=f"⚠️ Falha no Planejamento: {ctx.session.state.get('plan_review_result_failure_reason', 'Não foi possível criar um plano adequado.')}")])
+                content=Content(parts=[Part(text=state.get("plan_review_result_failure_reason", "Falha no plano."))])
             )
-        elif ctx.session.state.get("code_review_result_failed"):
+        elif state.get("code_review_result_failed"):
             yield Event(
                 author=self.name,
-                content=Content(parts=[Part(text=f"⚠️ Falha na Revisão de Código: {ctx.session.state.get('code_review_result_failure_reason', 'Código não atendeu aos critérios de qualidade.')}")])
+                content=Content(parts=[Part(text=state.get("code_review_result_failure_reason", "Falha na revisão de código."))])
             )
-        elif ctx.session.state.get("task_execution_failed"):
+        elif state.get("task_execution_failed"):
             yield Event(
                 author=self.name,
-                content=Content(parts=[Part(text=f"⚠️ Falha na Execução: {ctx.session.state.get('task_execution_failure_reason', 'Não foi possível completar todas as tarefas.')}")])
+                content=Content(parts=[Part(text=state.get("task_execution_failure_reason", "Falha na execução das tarefas."))])
             )
-        elif "final_code_delivery" in ctx.session.state:
+        elif "final_code_delivery" in state:
             yield Event(
                 author=self.name,
                 content=Content(parts=[Part(text="✅ Feature implementada com sucesso!")])
             )
-        elif "feature_snippet" not in ctx.session.state:
+        elif "feature_snippet" not in state:
             yield Event(
                 author=self.name,
                 content=Content(parts=[Part(text="Por favor, forneça uma descrição clara da feature a ser implementada.")])
             )
-        
-        # Optional: Reset the flag at the end to allow re-running in the same session
-        ctx.session.state["orchestrator_has_run"] = False
 
+        state["orchestrator_has_run"] = False
 
 # A nova raiz do agente
 root_agent = FeatureOrchestrator(
