@@ -96,10 +96,16 @@ def collect_code_snippets_callback(callback_context: CallbackContext) -> None:
 
 
 def unpack_extracted_input_callback(callback_context: CallbackContext) -> None:
-    """Unpacks the extracted_input dictionary into the session state."""
+    """
+    Unpacks the extracted_input dictionary into the session state and loads
+    the full source documents into a structured 'source_documents' dictionary
+    in the state.
+    """
+    # Unpack the immediate inputs from the user
     if "extracted_input" in callback_context.state:
         extracted_input_str = callback_context.state["extracted_input"]
         try:
+            # Handle JSON formatted as a string (common from LLMs)
             if isinstance(extracted_input_str, str):
                 if "```json" in extracted_input_str:
                     extracted_input_str = (
@@ -111,12 +117,26 @@ def unpack_extracted_input_callback(callback_context: CallbackContext) -> None:
             elif isinstance(extracted_input_str, dict):
                 extracted_input = extracted_input_str
             else:
+                # If it's neither a string nor a dict, we can't process it.
                 return
 
+            # Populate the state with the extracted user inputs
             if isinstance(extracted_input, dict):
+                # This is the main change: create a structured, immutable-like
+                # source for all original documents.
+                source_docs = {
+                    "ui_spec": extracted_input.pop("especificacao_tecnica_da_ui", None),
+                    "api_context": extracted_input.pop("contexto_api", None),
+                    "ux_truth": extracted_input.pop("fonte_da_verdade_ux", None),
+                }
+                callback_context.state["source_documents"] = source_docs
+
+                # Unpack any remaining keys from the input (like feature_snippet)
                 for key, value in extracted_input.items():
                     callback_context.state[key] = value
-        except (json.JSONDecodeError, IndexError):
+
+        except (json.JSONDecodeError, IndexError) as e:
+            logging.error(f"Error unpacking input: {e}")
             pass
 
 
@@ -340,15 +360,15 @@ context_synthesizer = LlmAgent(
     **Feature a Implementar:**
     {feature_snippet}
 
-    ## DOCUMENTOS DE REFERÊNCIA
+    ## DOCUMENTOS DE REFERÊNCIA (Acessados do Context Hub)
     ### Especificação Técnica da UI
-    {especificacao_tecnica_da_ui}
+    {source_documents[ui_spec]}
 
     ### Contexto da API
-    {contexto_api}
+    {source_documents[api_context]}
 
     ### Fonte da Verdade UX
-    {fonte_da_verdade_ux}
+    {source_documents[ux_truth]}
 
     ## SUA TAREFA
     Criar um "Feature Briefing" conciso e focado, extraindo:
@@ -433,11 +453,14 @@ plan_reviewer = LlmAgent(
     **Implementation Plan:**
     {implementation_plan}
 
-    **Feature Briefing:**
+    **Feature Briefing (para contexto geral):**
     {feature_briefing}
 
+    **Fonte da Verdade UX (para validação de fluxo):**
+    {source_documents[ux_truth]}
+
     ## CRITÉRIOS DE AVALIAÇÃO
-    1. **Completude**: O plano cobre todos os aspectos do briefing?
+    1. **Completude**: O plano cobre todos os aspectos do briefing E da fonte de verdade de UX?
     2. **Sequência Lógica**: As dependências estão corretas?
     3. **Granularidade**: As tarefas são pequenas o suficiente?
     4. **Clareza**: Cada tarefa está bem descrita?
@@ -480,14 +503,19 @@ code_generator = LlmAgent(
     
     Você é um desenvolvedor Flutter sênior gerando código production-ready para UMA tarefa específica.
 
-    ## CONTEXTO
-    **Feature Briefing:**
-    {feature_briefing}
-
+    ## CONTEXTO DA TAREFA
     **Tarefa Atual:**
     {current_task_info}
 
-    ## PADRÕES OBRIGATÓRIOS
+    ## FONTES DA VERDADE TÉCNICA (OBRIGATÓRIO SEGUIR)
+
+    ### Especificação Técnica da UI e Arquitetura:
+    {source_documents[ui_spec]}
+
+    ### Contexto da API (Endpoints, Payloads, Models):
+    {source_documents[api_context]}
+
+    ## PADRÕES DE CÓDIGO OBRIGATÓRIOS
 
     ### Para Models (use Freezed):
     ```dart
@@ -544,20 +572,28 @@ code_reviewer = LlmAgent(
     
     Você é um engenheiro principal realizando code review rigoroso.
 
-    ## CONTEXTO
-    **Feature Briefing:**
-    {feature_briefing}
-
+    ## CONTEXTO DA REVISÃO
     **Task Description:**
     {current_task_info}
 
     **Generated Code:**
     {generated_code}
 
+    ## FONTES DA VERDADE (Use para validar o código)
+    **1. Especificação Técnica da UI:**
+    {source_documents[ui_spec]}
+
+    **2. Contexto da API:**
+    {source_documents[api_context]}
+
+    **3. Fonte da Verdade UX:**
+    {source_documents[ux_truth]}
+
+
     ## CRITÉRIOS DE REVISÃO
 
     ### 1. Correção Funcional (40%)
-    - [ ] Implementa exatamente o que foi pedido?
+    - [ ] O código implementa EXATAMENTE o que a tarefa descreve, respeitando TODAS as fontes da verdade?
     - [ ] Lógica está correta?
     - [ ] Tratamento de erros adequado?
 
@@ -680,6 +716,7 @@ final_assembler = LlmAgent(
     **Feature Briefing:** {feature_briefing}
     **Implementation Plan:** {implementation_plan}
     **Approved Code Snippets:** {approved_code_snippets}
+    **Documentos Originais (para referência):** {source_documents}
 
     ## SUA MISSÃO
     Criar uma entrega completa que inclua:
