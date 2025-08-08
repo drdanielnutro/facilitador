@@ -271,7 +271,7 @@ class EnhancedStatusReporter(BaseAgent):
 
 
 class TaskInitializer(BaseAgent):
-    """Initializes the task index and total task count."""
+    """Initializes the task index, total task count, and other necessary state variables."""
 
     def __init__(self, name: str):
         super().__init__(name=name)
@@ -279,9 +279,19 @@ class TaskInitializer(BaseAgent):
     async def _run_async_impl(
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
-        tasks = ctx.session.state.get("implementation_tasks", [])
+        # Correctly access tasks from the implementation_plan object
+        implementation_plan = ctx.session.state.get("implementation_plan", {})
+        tasks = implementation_plan.get("implementation_tasks", [])
+        
+        # Ensure implementation_tasks is in the top-level state for other agents
+        ctx.session.state["implementation_tasks"] = tasks
+        
         ctx.session.state["current_task_index"] = 0
         ctx.session.state["total_tasks"] = len(tasks)
+        
+        # Initialize approved_code_snippets to prevent KeyError in final_assembler
+        ctx.session.state["approved_code_snippets"] = []
+        
         yield Event(author=self.name)
 
 
@@ -934,13 +944,13 @@ planning_pipeline = SequentialAgent(
     ],
 )
 
-# Task execution loop - processa uma tarefa por vez
-task_execution_loop = LoopAgent(
-    name="task_execution_loop",
-    max_iterations=20,  # Máximo de 20 tarefas por feature
+# Define the sequential pipeline for processing a single task.
+# This isolates the inner code_review_loop's escalation signal.
+single_task_pipeline = SequentialAgent(
+    name="single_task_pipeline",
     sub_agents=[
         TaskManager(name="task_manager"),
-        code_generator,  # Gera código
+        code_generator,
         LoopAgent(
             name="code_review_loop",
             max_iterations=3,
@@ -957,11 +967,20 @@ task_execution_loop = LoopAgent(
                 "Não foi possível atender aos critérios de revisão de código após 3 tentativas.",
             ),
         ),
-        code_approver,  # Salva código aprovado
+        code_approver,
         TaskIncrementer(name="task_incrementer"),
+    ],
+)
+
+# Task execution loop - processa uma tarefa por vez
+task_execution_loop = LoopAgent(
+    name="task_execution_loop",
+    max_iterations=20,  # Máximo de 20 tarefas por feature
+    sub_agents=[
+        single_task_pipeline,  # Run the self-contained pipeline for one task
         TaskCompletionChecker(
             name="task_completion_checker"
-        ),  # Verifica se há mais tarefas
+        ),  # Check if the outer loop should continue
     ],
     after_agent_callback=task_execution_failure_handler,
 )

@@ -1,69 +1,109 @@
 Coding Agent guidance:
+
+# Suas instruções estão em: 
+'/Users/institutorecriare/VSCodeProjects/facilitador/facilitador/contexto.md'
+
+O documento atual (GEMINI.md) contém a documentação oficial do Google ADK. Antes de ler esse documento você deve entender o projeto do documento 'contexto.md'.
+
+Sempre use o documento '/Users/institutorecriare/VSCodeProjects/facilitador/facilitador/.claude/agents/contextual-software-engineer.md' antes de responder as dúvidas do usuário. Ele visa garantir que você se mantenha con contexto.
+
 # Google Agent Development Kit (ADK) Python Cheatsheet
 
 This document serves as a long-form, comprehensive reference for building, orchestrating, and deploying AI agents using the Python Agent Development Kit (ADK). It aims to cover every significant aspect with greater detail, more code examples, and in-depth best practices.
 
 ## Table of Contents
 
-1.  [Core Concepts & Project Structure](#1-core-concepts--project-structure)
-    *   1.1 ADK's Foundational Principles
-    *   1.2 Essential Primitives
-    *   1.3 Standard Project Layout
-2.  [Agent Definitions (`LlmAgent`)](#2-agent-definitions-llmagent)
-    *   2.1 Basic `LlmAgent` Setup
-    *   2.2 Advanced `LlmAgent` Configuration
-    *   2.3 LLM Instruction Crafting
-3.  [Orchestration with Workflow Agents](#3-orchestration-with-workflow-agents)
-    *   3.1 `SequentialAgent`: Linear Execution
-    *   3.2 `ParallelAgent`: Concurrent Execution
-    *   3.3 `LoopAgent`: Iterative Processes
-4.  [Multi-Agent Systems & Communication](#4-multi-agent-systems--communication)
-    *   4.1 Agent Hierarchy
-    *   4.2 Inter-Agent Communication Mechanisms
-    *   4.3 Common Multi-Agent Patterns
-5.  [Building Custom Agents (`BaseAgent`)](#5-building-custom-agents-baseagent)
-    *   5.1 When to Use Custom Agents
-    *   5.2 Implementing `_run_async_impl`
-6.  [Models: Gemini, LiteLLM, and Vertex AI](#6-models-gemini-litellm-and-vertex-ai)
-    *   6.1 Google Gemini Models (AI Studio & Vertex AI)
-    *   6.2 Other Cloud & Proprietary Models via LiteLLM
-    *   6.3 Open & Local Models via LiteLLM (Ollama, vLLM)
-    *   6.4 Customizing LLM API Clients
-7.  [Tools: The Agent's Capabilities](#7-tools-the-agents-capabilities)
-    *   7.1 Defining Function Tools: Principles & Best Practices
-    *   7.2 The `ToolContext` Object: Accessing Runtime Information
-    *   7.3 All Tool Types & Their Usage
-8.  [Context, State, and Memory Management](#8-context-state-and-memory-management)
-    *   8.1 The `Session` Object & `SessionService`
-    *   8.2 `State`: The Conversational Scratchpad
-    *   8.3 `Memory`: Long-Term Knowledge & Retrieval
-    *   8.4 `Artifacts`: Binary Data Management
-9.  [Runtime, Events, and Execution Flow](#9-runtime-events-and-execution-flow)
-    *   9.1 The `Runner`: The Orchestrator
-    *   9.2 The Event Loop: Core Execution Flow
-    *   9.3 `Event` Object: The Communication Backbone
-    *   9.4 Asynchronous Programming (Python Specific)
-10. [Control Flow with Callbacks](#10-control-flow-with-callbacks)
-    *   10.1 Callback Mechanism: Interception & Control
-    *   10.2 Types of Callbacks
-    *   10.3 Callback Best Practices
-11. [Authentication for Tools](#11-authentication-for-tools)
-    *   11.1 Core Concepts: `AuthScheme` & `AuthCredential`
-    *   11.2 Interactive OAuth/OIDC Flows
-    *   11.3 Custom Tool Authentication
-12. [Deployment Strategies](#12-deployment-strategies)
-    *   12.1 Local Development & Testing (`adk web`, `adk run`, `adk api_server`)
-    *   12.2 Vertex AI Agent Engine
-    *   12.3 Cloud Run
-    *   12.4 Google Kubernetes Engine (GKE)
-    *   12.5 CI/CD Integration
-13. [Evaluation and Safety](#13-evaluation-and-safety)
-    *   13.1 Agent Evaluation (`adk eval`)
-    *   13.2 Safety & Guardrails
-14. [Debugging, Logging & Observability](#14-debugging-logging--observability)
-15. [Advanced I/O Modalities](#15-advanced-io-modalities)
-16. [Performance Optimization](#16-performance-optimization)
-17. [General Best Practices & Common Pitfalls](#17-general-best-practices--common-pitfalls)
+- [Suas instruções estão em:](#suas-instruções-estão-em)
+- [Google Agent Development Kit (ADK) Python Cheatsheet](#google-agent-development-kit-adk-python-cheatsheet)
+  - [Table of Contents](#table-of-contents)
+  - [1. Core Concepts \& Project Structure](#1-core-concepts--project-structure)
+    - [1.1 ADK's Foundational Principles](#11-adks-foundational-principles)
+    - [1.2 Essential Primitives](#12-essential-primitives)
+    - [1.3 Standard Project Layout](#13-standard-project-layout)
+  - [2. Agent Definitions (`LlmAgent`)](#2-agent-definitions-llmagent)
+    - [2.1 Basic `LlmAgent` Setup](#21-basic-llmagent-setup)
+    - [2.2 Advanced `LlmAgent` Configuration](#22-advanced-llmagent-configuration)
+      - [**Example: Defining and Using Structured Output**](#example-defining-and-using-structured-output)
+    - [2.3 LLM Instruction Crafting (`instruction`)](#23-llm-instruction-crafting-instruction)
+  - [3. Orchestration with Workflow Agents](#3-orchestration-with-workflow-agents)
+    - [3.1 `SequentialAgent`: Linear Execution](#31-sequentialagent-linear-execution)
+    - [3.2 `ParallelAgent`: Concurrent Execution](#32-parallelagent-concurrent-execution)
+    - [3.3 `LoopAgent`: Iterative Processes](#33-loopagent-iterative-processes)
+      - [**Termination of `LoopAgent`**](#termination-of-loopagent)
+      - [**Example: Iterative Refinement Loop with a Custom `BaseAgent` for Control**](#example-iterative-refinement-loop-with-a-custom-baseagent-for-control)
+  - [4. Multi-Agent Systems \& Communication](#4-multi-agent-systems--communication)
+    - [4.1 Agent Hierarchy](#41-agent-hierarchy)
+    - [4.2 Inter-Agent Communication Mechanisms](#42-inter-agent-communication-mechanisms)
+    - [4.3 Common Multi-Agent Patterns](#43-common-multi-agent-patterns)
+      - [**Example: Hierarchical Planner/Executor Pattern**](#example-hierarchical-plannerexecutor-pattern)
+  - [5. Building Custom Agents (`BaseAgent`)](#5-building-custom-agents-baseagent)
+    - [5.1 When to Use Custom Agents](#51-when-to-use-custom-agents)
+    - [5.2 Implementing `_run_async_impl`](#52-implementing-_run_async_impl)
+      - [**Example: A Custom Agent for Loop Control**](#example-a-custom-agent-for-loop-control)
+  - [6. Models: Gemini, LiteLLM, and Vertex AI](#6-models-gemini-litellm-and-vertex-ai)
+    - [6.1 Google Gemini Models (AI Studio \& Vertex AI)](#61-google-gemini-models-ai-studio--vertex-ai)
+    - [6.2 Other Cloud \& Proprietary Models via LiteLLM](#62-other-cloud--proprietary-models-via-litellm)
+    - [6.3 Open \& Local Models via LiteLLM (Ollama, vLLM)](#63-open--local-models-via-litellm-ollama-vllm)
+    - [6.4 Customizing LLM API Clients](#64-customizing-llm-api-clients)
+  - [7. Tools: The Agent's Capabilities](#7-tools-the-agents-capabilities)
+    - [7.1 Defining Function Tools: Principles \& Best Practices](#71-defining-function-tools-principles--best-practices)
+    - [7.2 The `ToolContext` Object: Accessing Runtime Information](#72-the-toolcontext-object-accessing-runtime-information)
+    - [7.3 All Tool Types \& Their Usage](#73-all-tool-types--their-usage)
+  - [8. Context, State, and Memory Management](#8-context-state-and-memory-management)
+    - [8.1 The `Session` Object \& `SessionService`](#81-the-session-object--sessionservice)
+    - [8.2 `State`: The Conversational Scratchpad](#82-state-the-conversational-scratchpad)
+    - [8.3 `Memory`: Long-Term Knowledge \& Retrieval](#83-memory-long-term-knowledge--retrieval)
+    - [8.4 `Artifacts`: Binary Data Management](#84-artifacts-binary-data-management)
+  - [9. Runtime, Events, and Execution Flow](#9-runtime-events-and-execution-flow)
+    - [9.1 The `Runner`: The Orchestrator](#91-the-runner-the-orchestrator)
+    - [9.2 The Event Loop: Core Execution Flow](#92-the-event-loop-core-execution-flow)
+    - [9.3 `Event` Object: The Communication Backbone](#93-event-object-the-communication-backbone)
+    - [9.4 Asynchronous Programming (Python Specific)](#94-asynchronous-programming-python-specific)
+  - [10. Control Flow with Callbacks](#10-control-flow-with-callbacks)
+    - [10.1 Callback Mechanism: Interception \& Control](#101-callback-mechanism-interception--control)
+    - [10.2 Types of Callbacks](#102-types-of-callbacks)
+    - [10.3 Callback Best Practices](#103-callback-best-practices)
+      - [**Example 1: Data Aggregation with `after_agent_callback`**](#example-1-data-aggregation-with-after_agent_callback)
+      - [**Example 2: Output Transformation with `after_agent_callback`**](#example-2-output-transformation-with-after_agent_callback)
+  - [11. Authentication for Tools](#11-authentication-for-tools)
+    - [11.1 Core Concepts: `AuthScheme` \& `AuthCredential`](#111-core-concepts-authscheme--authcredential)
+    - [11.2 Interactive OAuth/OIDC Flows](#112-interactive-oauthoidc-flows)
+    - [11.3 Custom Tool Authentication](#113-custom-tool-authentication)
+  - [12. Deployment Strategies](#12-deployment-strategies)
+    - [12.1 Local Development \& Testing (`adk web`, `adk run`, `adk api_server`)](#121-local-development--testing-adk-web-adk-run-adk-api_server)
+    - [12.2 Vertex AI Agent Engine](#122-vertex-ai-agent-engine)
+    - [12.3 Cloud Run](#123-cloud-run)
+    - [12.4 Google Kubernetes Engine (GKE)](#124-google-kubernetes-engine-gke)
+    - [12.5 CI/CD Integration](#125-cicd-integration)
+  - [13. Evaluation and Safety](#13-evaluation-and-safety)
+    - [13.1 Agent Evaluation (`adk eval`)](#131-agent-evaluation-adk-eval)
+    - [13.2 Safety \& Guardrails](#132-safety--guardrails)
+  - [14. Debugging, Logging \& Observability](#14-debugging-logging--observability)
+  - [15. Advanced I/O Modalities](#15-advanced-io-modalities)
+  - [16. Performance Optimization](#16-performance-optimization)
+  - [17. General Best Practices \& Common Pitfalls](#17-general-best-practices--common-pitfalls)
+    - [Testing the output of an agent](#testing-the-output-of-an-agent)
+  - [**llm.txt** documents the "Agent Starter Pack" repository, providing a source of truth on its purpose, features, and usage.](#llmtxt-documents-the-agent-starter-pack-repository-providing-a-source-of-truth-on-its-purpose-features-and-usage)
+    - [Section 1: Project Overview](#section-1-project-overview)
+    - [Section 2: Creating a New Agent Project](#section-2-creating-a-new-agent-project)
+    - [`agent-starter-pack create` Command](#agent-starter-pack-create-command)
+    - [Available Agent Templates](#available-agent-templates)
+    - [Including a Data Ingestion Pipeline (for RAG agents)](#including-a-data-ingestion-pipeline-for-rag-agents)
+    - [Section 3: Development \& Automated Deployment Workflow](#section-3-development--automated-deployment-workflow)
+    - [1. Local Development \& Iteration](#1-local-development--iteration)
+      - [Programmatic Testing (Recommended Workflow)](#programmatic-testing-recommended-workflow)
+      - [Manual Testing with the UI Playground (Optional)](#manual-testing-with-the-ui-playground-optional)
+    - [2. Deploying to a Cloud Development Environment](#2-deploying-to-a-cloud-development-environment)
+    - [3. Automated Production-Ready Deployment with CI/CD](#3-automated-production-ready-deployment-with-cicd)
+    - [Section 4: Key Features \& Customization](#section-4-key-features--customization)
+    - [Deploying with a User Interface (UI)](#deploying-with-a-user-interface-ui)
+    - [Session Management](#session-management)
+    - [Monitoring \& Observability](#monitoring--observability)
+    - [Section 5: CLI Reference for CI/CD Setup](#section-5-cli-reference-for-cicd-setup)
+    - [`agent-starter-pack setup-cicd`](#agent-starter-pack-setup-cicd)
+    - [Section 6: Operational Guidelines for Coding Agents](#section-6-operational-guidelines-for-coding-agents)
+    - [Principle 1: Code Preservation \& Isolation](#principle-1-code-preservation--isolation)
+    - [Principle 2: Workflow \& Execution Best Practices](#principle-2-workflow--execution-best-practices)
 
 ---
 
@@ -1316,14 +1356,14 @@ uvx agent-starter-pack create my-automated-agent \
 
 Templates for the `create` command (via `-a` or `--agent`):
 
-| Agent Name             | Description                                  |
-| :--------------------- | :------------------------------------------- |
-| `adk_base`             | Base ReAct agent (ADK)                       |
-| `adk_gemini_fullstack` | Production-ready fullstack research agent    |
-| `agentic_rag`          | RAG agent for document retrieval & Q&A       |
-| `langgraph_base_react` | Base ReAct agent (LangGraph)                 |
-| `crewai_coding_crew`   | Multi-agent collaborative coding assistance  |
-| `live_api`             | Real-time multimodal RAG agent               |
+| Agent Name             | Description                                 |
+| :--------------------- | :------------------------------------------ |
+| `adk_base`             | Base ReAct agent (ADK)                      |
+| `adk_gemini_fullstack` | Production-ready fullstack research agent   |
+| `agentic_rag`          | RAG agent for document retrieval & Q&A      |
+| `langgraph_base_react` | Base ReAct agent (LangGraph)                |
+| `crewai_coding_crew`   | Multi-agent collaborative coding assistance |
+| `live_api`             | Real-time multimodal RAG agent              |
 
 ---
 
