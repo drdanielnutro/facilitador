@@ -348,6 +348,37 @@ class TaskIncrementer(BaseAgent):
         yield Event(author=self.name)
 
 
+class LoopControllerAgent(BaseAgent):
+    """Runs a child loop agent and contains its escalation signals."""
+
+    def __init__(self, name: str, loop_to_run: LoopAgent):
+        super().__init__(name=name)
+        self._loop_to_run = loop_to_run
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        """Runs the child loop and swallows any escalate=True events."""
+        logging.info(f"[{self.name}] Starting controlled loop: {self._loop_to_run.name}")
+
+        async for event in self._loop_to_run.run_async(ctx):
+            # Check if the event from the sub-loop has an escalate action
+            if event.actions and event.actions.escalate:
+                logging.info(
+                    f"[{self.name}] Contained escalate signal from"
+                    f" {self._loop_to_run.name}. Stopping child loop."
+                )
+                # Stop processing events from the child loop
+                break
+            else:
+                # Pass through any other events (e.g., status updates)
+                yield event
+
+        # Signal that this controller has finished its work normally
+        logging.info(f"[{self.name}] Controlled loop finished.")
+        yield Event(author=self.name)
+
+
 # --- PLANNING PIPELINE AGENTS ---
 
 context_synthesizer = LlmAgent(
@@ -944,43 +975,40 @@ planning_pipeline = SequentialAgent(
     ],
 )
 
-# Define the sequential pipeline for processing a single task.
-# This isolates the inner code_review_loop's escalation signal.
-single_task_pipeline = SequentialAgent(
-    name="single_task_pipeline",
+# Define the inner loop for code review and refinement.
+code_review_loop = LoopAgent(
+    name="code_review_loop",
+    max_iterations=3,
+    sub_agents=[
+        code_reviewer,
+        EscalationChecker(
+            name="code_escalation_checker",
+            review_key="code_review_result",
+        ),
+        code_refiner,
+    ],
+    after_agent_callback=make_failure_handler(
+        "code_review_result",
+        "Não foi possível atender aos critérios de revisão de código após 3 tentativas.",
+    ),
+)
+
+# Task execution loop - processa uma tarefa por vez.
+# This loop iterates through each task, running the generation and review process.
+task_execution_loop = LoopAgent(
+    name="task_execution_loop",
+    max_iterations=20,  # Max of 20 tasks per feature
     sub_agents=[
         TaskManager(name="task_manager"),
         code_generator,
-        LoopAgent(
-            name="code_review_loop",
-            max_iterations=3,
-            sub_agents=[
-                code_reviewer,
-                EscalationChecker(
-                    name="code_escalation_checker",
-                    review_key="code_review_result",
-                ),
-                code_refiner,
-            ],
-            after_agent_callback=make_failure_handler(
-                "code_review_result",
-                "Não foi possível atender aos critérios de revisão de código após 3 tentativas.",
-            ),
-        ),
+        LoopControllerAgent(
+            name="review_loop_controller", loop_to_run=code_review_loop
+        ),  # The controller now wraps the inner loop
         code_approver,
         TaskIncrementer(name="task_incrementer"),
-    ],
-)
-
-# Task execution loop - processa uma tarefa por vez
-task_execution_loop = LoopAgent(
-    name="task_execution_loop",
-    max_iterations=20,  # Máximo de 20 tarefas por feature
-    sub_agents=[
-        single_task_pipeline,  # Run the self-contained pipeline for one task
         TaskCompletionChecker(
             name="task_completion_checker"
-        ),  # Check if the outer loop should continue
+        ),  # Checks if all tasks are done
     ],
     after_agent_callback=task_execution_failure_handler,
 )
