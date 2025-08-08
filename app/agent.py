@@ -206,6 +206,22 @@ class TaskCompletionChecker(BaseAgent):
             yield Event(author=self.name)
 
 
+class EscalationBarrier(BaseAgent):
+    """Runs a sub-agent and consumes any escalate signals it emits."""
+
+    def __init__(self, name: str, agent: BaseAgent):
+        super().__init__(name=name)
+        self._agent = agent
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        async for event in self._agent.run_async(ctx):
+            if event.actions and event.actions.escalate:
+                event.actions.escalate = False
+            yield event
+
+
 class EnhancedStatusReporter(BaseAgent):
     """Repórter de status com estimativas de tempo e progresso visual."""
 
@@ -920,52 +936,62 @@ input_processor = LlmAgent(
 
 # --- PIPELINE DEFINITIONS ---
 
+plan_review_loop = LoopAgent(
+    name="plan_review_loop",
+    max_iterations=3,
+    sub_agents=[
+        feature_planner,
+        plan_reviewer,
+        EscalationChecker(
+            name="plan_escalation_checker",
+            review_key="plan_review_result",
+        ),
+    ],
+    after_agent_callback=make_failure_handler(
+        "plan_review_result",
+        "Não foi possível atender aos critérios de revisão após 3 tentativas.",
+    ),
+)
+
 planning_pipeline = SequentialAgent(
     name="planning_pipeline",
     description="Creates comprehensive implementation plan for a feature.",
     sub_agents=[
         context_synthesizer,
-        LoopAgent(
-            name="plan_review_loop",
-            max_iterations=3,
-            sub_agents=[
-                feature_planner,  # Cria ou refaz o plano
-                plan_reviewer,    # Revisa o plano
-                EscalationChecker(
-                    name="plan_escalation_checker",
-                    review_key="plan_review_result",
-                ),
-            ],
-            after_agent_callback=make_failure_handler(
-                "plan_review_result",
-                "Não foi possível atender aos critérios de revisão após 3 tentativas.",
-            ),
+        EscalationBarrier(
+            name="plan_review_stage",
+            agent=plan_review_loop,
         ),
     ],
 )
 
 # Define the sequential pipeline for processing a single task.
 # This isolates the inner code_review_loop's escalation signal.
+code_review_loop = LoopAgent(
+    name="code_review_loop",
+    max_iterations=3,
+    sub_agents=[
+        code_reviewer,
+        EscalationChecker(
+            name="code_escalation_checker",
+            review_key="code_review_result",
+        ),
+        code_refiner,
+    ],
+    after_agent_callback=make_failure_handler(
+        "code_review_result",
+        "Não foi possível atender aos critérios de revisão de código após 3 tentativas.",
+    ),
+)
+
 single_task_pipeline = SequentialAgent(
     name="single_task_pipeline",
     sub_agents=[
         TaskManager(name="task_manager"),
         code_generator,
-        LoopAgent(
-            name="code_review_loop",
-            max_iterations=3,
-            sub_agents=[
-                code_reviewer,
-                EscalationChecker(
-                    name="code_escalation_checker",
-                    review_key="code_review_result",
-                ),
-                code_refiner,
-            ],
-            after_agent_callback=make_failure_handler(
-                "code_review_result",
-                "Não foi possível atender aos critérios de revisão de código após 3 tentativas.",
-            ),
+        EscalationBarrier(
+            name="code_review_stage",
+            agent=code_review_loop,
         ),
         code_approver,
         TaskIncrementer(name="task_incrementer"),
