@@ -90,6 +90,93 @@ def unpack_extracted_input_callback(callback_context: CallbackContext) -> None:
 
 ---
 
+#### **Fase 1.5: Definição e Implementação do `DocumentLoader`**
+
+Para garantir que os documentos sejam carregados corretamente e que os agentes subsequentes tenham acesso a eles, definimos a classe `DocumentLoader` como um `BaseAgent`. Este agente será responsável por ler os arquivos do diretório `docs/` e popular o estado da sessão com as chaves exatas que a lógica anterior utilizava.
+
+*   **Arquivo a ser Editado:** `/Users/institutorecriare/VSCodeProjects/facilitador/facilitador/app/agent.py`
+*   **Ação:** Adição de Nova Classe
+
+##### **Código Completo da Classe `DocumentLoader` a ser ADICIONADO:**
+
+```python
+import os
+import logging
+from google.adk.agents import BaseAgent
+from google.adk.agents.invocation_context import InvocationContext
+from google.adk.events import Event
+
+# Adicionar esta classe antes da definição do `complete_pipeline`
+
+class DocumentLoader(BaseAgent):
+    """
+    Um agente programático que carrega documentos de contexto do sistema de arquivos
+    para o estado da sessão.
+    """
+
+    def __init__(self, name: str):
+        super().__init__(name=name)
+        # O caminho base para o diretório 'docs'.
+        # Em um cenário real, isso poderia vir de uma configuração.
+        self._docs_path = "/Users/institutorecriare/VSCodeProjects/facilitador/facilitador/docs"
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        """
+        Executa a lógica de carregamento de documentos.
+        """
+        logging.info(f"[{self.name}] Iniciando carregamento de documentos de '{self._docs_path}'...")
+
+        # Mapeamento das chaves de estado para os nomes de arquivo e chaves do dicionário.
+        # Isso garante que as chaves usadas pelos outros agentes sejam respeitadas.
+        doc_map = {
+            "especificacao_tecnica_da_ui": {"file": "especificacao_tecnica_da_ui.md", "dict_key": "ui_spec"},
+            "contexto_api": {"file": "contexto_api.md", "dict_key": "api_context"},
+            "fonte_da_verdade_ux": {"file": "fonte_da_verdade.md", "dict_key": "ux_truth"},
+        }
+
+        # Dicionário para armazenar os documentos para a chave 'original_docs'.
+        original_docs = {}
+        
+        for state_key, info in doc_map.items():
+            file_path = os.path.join(self._docs_path, info["file"])
+            try:
+                # Simula a leitura de um arquivo. Em uma implementação real,
+                # poderia usar uma ferramenta como 'read_file'.
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+
+                # 1. Popula a chave de estado direta (ex: 'especificacao_tecnica_da_ui').
+                ctx.session.state[state_key] = content
+                
+                # 2. Popula o dicionário que se tornará 'original_docs'.
+                original_docs[info["dict_key"]] = content
+                
+                logging.info(f"[{self.name}] Documento '{info['file']}' carregado com sucesso para o estado.")
+
+            except FileNotFoundError:
+                error_message = f"DOCUMENTO NÃO ENCONTRADO: {info['file']}"
+                ctx.session.state[state_key] = error_message
+                original_docs[info["dict_key"]] = error_message
+                logging.warning(f"[{self.name}] {error_message}")
+            except Exception as e:
+                error_message = f"ERRO AO LER DOCUMENTO: {info['file']} - {e}"
+                ctx.session.state[state_key] = error_message
+                original_docs[info["dict_key"]] = error_message
+                logging.error(f"[{self.name}] {error_message}")
+
+        # 3. Popula a chave de estado 'original_docs' com o dicionário completo.
+        ctx.session.state["original_docs"] = original_docs
+        logging.info(f"[{self.name}] Estrutura 'original_docs' populada com as chaves: {list(original_docs.keys())}")
+
+        # Sinaliza a conclusão da sua tarefa.
+        yield Event(author=self.name)
+
+```
+
+---
+
 #### **Fase 2: Integrar o `DocumentLoader` no Pipeline Principal**
 
 Agora, com o `DocumentLoader` definido, vamos inseri-lo no pipeline `complete_pipeline`. Ele será executado logo após o `input_processor`, garantindo que os documentos estejam disponíveis no estado antes que o `planning_pipeline` comece.
